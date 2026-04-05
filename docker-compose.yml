@@ -91,11 +91,11 @@ services:
       corp_network:
         ipv4_address: 172.21.0.30
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pR00tVulnCorp!"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 30
+      start_period: 60s
     labels:
       vulncorp.zone: "produccion+corporativa"
       vulncorp.role: "base-de-datos"
