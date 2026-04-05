@@ -128,6 +128,7 @@ docker compose ps
 |----------|-----|-------------|
 | PetaShop (tienda) | http://localhost:8080 | — |
 | PetaShop Admin | http://localhost:8080/admin4vulncorp | admin@vulncorp.local / VulnCorp2024! |
+| Nginx Proxy | http://localhost:8082 | — |
 | phpMyAdmin | http://localhost:8081 | root / R00tVulnCorp! |
 | Dashboard | http://localhost:3000 | — |
 

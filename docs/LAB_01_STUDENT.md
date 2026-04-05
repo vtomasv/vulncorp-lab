@@ -90,6 +90,7 @@ Abra en su navegador:
 | Servicio | URL | Descripción |
 |----------|-----|-------------|
 | PetaShop (tienda) | http://localhost:8080 | Comercio electrónico público |
+| Nginx Proxy | http://localhost:8082 | Proxy inverso (punto de entrada real) |
 | phpMyAdmin | http://localhost:8081 | Administración de base de datos |
 | Dashboard | http://localhost:3000 | Dashboard de vulnerabilidades |
 

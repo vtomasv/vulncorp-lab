@@ -16,12 +16,15 @@ services:
   # =========================================================================
 
   # --- Proxy Inverso / Web Server (Nginx vulnerable) ---
+  # Nginx actúa como proxy inverso frente a PrestaShop.
+  # Se expone en el puerto 8082 para demostrar su presencia en la arquitectura.
+  # El tráfico principal de la tienda pasa por aquí en un escenario real.
   nginx-proxy:
     image: nginx:1.21.0
     container_name: vulncorp-nginx-proxy
     hostname: nginx-proxy
     ports:
-      - "8080:80"
+      - "8082:80"
     volumes:
       - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
@@ -37,10 +40,15 @@ services:
     restart: unless-stopped
 
   # --- PrestaShop E-commerce (versión vulnerable) ---
+  # Se expone directamente en el puerto 8080 para evitar redirect loops
+  # causados por la combinación proxy+canonical URL de PrestaShop.
+  # En un escenario real, solo Nginx estaría expuesto a Internet.
   prestashop:
     image: prestashop/prestashop:1.7.8.0
     container_name: vulncorp-prestashop
     hostname: prestashop
+    ports:
+      - "8080:80"
     environment:
       - DB_SERVER=mariadb-prod
       - DB_PORT=3306
@@ -56,6 +64,7 @@ services:
       - ADMIN_PASSWD=VulnCorp2024!
       - PS_COUNTRY=CL
       - PS_LANGUAGE=es
+      - PS_ENABLE_SSL=0
     depends_on:
       mariadb-prod:
         condition: service_healthy
