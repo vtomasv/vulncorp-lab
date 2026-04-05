@@ -1,0 +1,20 @@
+# Reportes de escaneo (se generan localmente)
+data/*.json
+data/*.jsonl
+
+# Node modules del dashboard
+dashboard/node_modules/
+
+# Docker volumes
+mysql_data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

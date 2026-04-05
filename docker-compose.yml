@@ -1,0 +1,251 @@
+###############################################################################
+#  VulnCorp Lab — Unidad 1: Gestión de Vulnerabilidades (MITRE)
+#  Curso MAR303 — Universidad Mayor — Profesor Tomás Vera — 2026
+#
+#  ADVERTENCIA: Este entorno contiene software INTENCIONALMENTE VULNERABLE.
+#  Úselo SOLO con fines educativos en redes aisladas.
+#  NO exponer a Internet. NO usar en producción.
+###############################################################################
+
+services:
+
+  # =========================================================================
+  #  RED DE PRODUCCIÓN — E-commerce "PetaShop" (Tienda de Mascotas)
+  # =========================================================================
+
+  # --- Proxy Inverso / Web Server (Nginx vulnerable) ---
+  nginx-proxy:
+    image: nginx:1.21.0
+    container_name: vulncorp-nginx-proxy
+    hostname: nginx-proxy
+    ports:
+      - "8080:80"
+    volumes:
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - prestashop
+    networks:
+      prod_network:
+        ipv4_address: 172.20.0.10
+    labels:
+      vulncorp.zone: "produccion"
+      vulncorp.role: "proxy-inverso"
+      vulncorp.exposure: "internet"
+      vulncorp.criticality: "alta"
+    restart: unless-stopped
+
+  # --- PrestaShop E-commerce (versión vulnerable) ---
+  prestashop:
+    image: prestashop/prestashop:1.7.8.0
+    container_name: vulncorp-prestashop
+    hostname: prestashop
+    environment:
+      - DB_SERVER=mysql-prod
+      - DB_PORT=3306
+      - DB_NAME=prestashop
+      - DB_USER=ps_user
+      - DB_PASSWD=PetaShop2024!
+      - PS_DEV_MODE=1
+      - PS_INSTALL_AUTO=1
+      - PS_DOMAIN=localhost:8080
+      - PS_FOLDER_ADMIN=admin4vulncorp
+      - PS_FOLDER_INSTALL=install4vulncorp
+      - ADMIN_MAIL=admin@vulncorp.local
+      - ADMIN_PASSWD=VulnCorp2024!
+      - PS_COUNTRY=CL
+      - PS_LANGUAGE=es
+    depends_on:
+      mysql-prod:
+        condition: service_healthy
+    networks:
+      prod_network:
+        ipv4_address: 172.20.0.20
+    labels:
+      vulncorp.zone: "produccion"
+      vulncorp.role: "ecommerce-app"
+      vulncorp.exposure: "internet-via-proxy"
+      vulncorp.criticality: "critica"
+    restart: unless-stopped
+
+  # --- Base de Datos MySQL (versión EOL con CVEs conocidos) ---
+  mysql-prod:
+    image: mysql:5.7.36
+    container_name: vulncorp-mysql
+    hostname: mysql-prod
+    environment:
+      - MYSQL_ROOT_PASSWORD=R00tVulnCorp!
+      - MYSQL_DATABASE=prestashop
+      - MYSQL_USER=ps_user
+      - MYSQL_PASSWORD=PetaShop2024!
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      prod_network:
+        ipv4_address: 172.20.0.30
+      corp_network:
+        ipv4_address: 172.21.0.30
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pR00tVulnCorp!"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    labels:
+      vulncorp.zone: "produccion+corporativa"
+      vulncorp.role: "base-de-datos"
+      vulncorp.exposure: "interna"
+      vulncorp.criticality: "critica"
+      vulncorp.data: "PII-clientes,transacciones"
+    restart: unless-stopped
+
+  # --- Redis Cache (versión con CVEs) ---
+  redis-cache:
+    image: redis:6.2.6
+    container_name: vulncorp-redis
+    hostname: redis-cache
+    command: redis-server --requirepass ""
+    networks:
+      prod_network:
+        ipv4_address: 172.20.0.40
+    labels:
+      vulncorp.zone: "produccion"
+      vulncorp.role: "cache"
+      vulncorp.exposure: "interna"
+      vulncorp.criticality: "media"
+    restart: unless-stopped
+
+  # =========================================================================
+  #  RED CORPORATIVA — Terminales de Trabajadores
+  # =========================================================================
+
+  # --- phpMyAdmin (acceso de empleados a la BD — ERROR ARQUITECTÓNICO) ---
+  phpmyadmin:
+    image: phpmyadmin:5.1.1
+    container_name: vulncorp-phpmyadmin
+    hostname: phpmyadmin
+    environment:
+      - PMA_HOST=mysql-prod
+      - PMA_PORT=3306
+      - PMA_USER=root
+      - PMA_PASSWORD=R00tVulnCorp!
+      - UPLOAD_LIMIT=50M
+    ports:
+      - "8081:80"
+    depends_on:
+      mysql-prod:
+        condition: service_healthy
+    networks:
+      corp_network:
+        ipv4_address: 172.21.0.10
+    labels:
+      vulncorp.zone: "corporativa"
+      vulncorp.role: "admin-bd"
+      vulncorp.exposure: "red-interna"
+      vulncorp.criticality: "alta"
+      vulncorp.risk_note: "Acceso root a BD de produccion desde red corporativa"
+    restart: unless-stopped
+
+  # --- Terminal de Soporte (Ubuntu antiguo con herramientas) ---
+  workstation:
+    image: ubuntu:20.04
+    container_name: vulncorp-workstation
+    hostname: workstation-soporte
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq curl wget net-tools iputils-ping dnsutils mysql-client nano > /dev/null 2>&1 &&
+        echo '=== VulnCorp Workstation Ready ===' &&
+        tail -f /dev/null
+      "
+    networks:
+      corp_network:
+        ipv4_address: 172.21.0.20
+    labels:
+      vulncorp.zone: "corporativa"
+      vulncorp.role: "terminal-empleado"
+      vulncorp.exposure: "red-interna"
+      vulncorp.criticality: "baja"
+    restart: unless-stopped
+
+  # --- Servidor de Archivos (vsftpd vulnerable) ---
+  ftp-server:
+    image: fauria/vsftpd
+    container_name: vulncorp-ftp
+    hostname: ftp-server
+    environment:
+      - FTP_USER=vulncorp
+      - FTP_PASS=files2024
+      - PASV_ADDRESS=172.21.0.40
+      - PASV_MIN_PORT=21100
+      - PASV_MAX_PORT=21110
+    networks:
+      corp_network:
+        ipv4_address: 172.21.0.40
+    labels:
+      vulncorp.zone: "corporativa"
+      vulncorp.role: "file-server"
+      vulncorp.exposure: "red-interna"
+      vulncorp.criticality: "media"
+      vulncorp.risk_note: "FTP sin cifrado - credenciales en texto plano"
+    restart: unless-stopped
+
+  # =========================================================================
+  #  RED DE GESTIÓN — Herramientas de Seguridad
+  # =========================================================================
+
+  # --- Dashboard de Vulnerabilidades (aplicación web personalizada) ---
+  vuln-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: vulncorp-dashboard
+    hostname: vuln-dashboard
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    networks:
+      mgmt_network:
+        ipv4_address: 172.22.0.10
+    labels:
+      vulncorp.zone: "gestion"
+      vulncorp.role: "dashboard-vulnerabilidades"
+    restart: unless-stopped
+
+# =============================================================================
+#  REDES
+# =============================================================================
+networks:
+  prod_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
+    labels:
+      vulncorp.description: "Red de Produccion - E-commerce PetaShop"
+
+  corp_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+          gateway: 172.21.0.1
+    labels:
+      vulncorp.description: "Red Corporativa - Terminales de trabajo"
+
+  mgmt_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+          gateway: 172.22.0.1
+    labels:
+      vulncorp.description: "Red de Gestion - Herramientas de seguridad"
+
+# =============================================================================
+#  VOLÚMENES
+# =============================================================================
+volumes:
+  mysql_data:
+    driver: local

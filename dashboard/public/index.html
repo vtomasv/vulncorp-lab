@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VulnCorp — Dashboard de Gestión de Vulnerabilidades</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --critical: #ef4444;
+            --high: #f97316;
+            --medium: #eab308;
+            --low: #22c55e;
+            --unknown: #6b7280;
+            --border: #334155;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+            border-bottom: 2px solid var(--accent-blue);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header h1 .logo { color: var(--accent-cyan); }
+        .header .subtitle { color: var(--text-secondary); font-size: 0.85rem; }
+
+        .header-right {
+            text-align: right;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+
+        /* Alert Banner */
+        .alert-banner {
+            background: linear-gradient(90deg, rgba(239,68,68,0.15), rgba(239,68,68,0.05));
+            border: 1px solid rgba(239,68,68,0.3);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .alert-banner .icon { font-size: 1.5rem; }
+        .alert-banner .text { flex: 1; }
+        .alert-banner .text strong { color: var(--critical); }
+
+        /* KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .kpi-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.25rem;
+            border: 1px solid var(--border);
+            transition: transform 0.2s;
+        }
+
+        .kpi-card:hover { transform: translateY(-2px); }
+        .kpi-card .label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+        .kpi-card .value { font-size: 2rem; font-weight: 700; margin: 0.25rem 0; }
+        .kpi-card .detail { font-size: 0.8rem; color: var(--text-secondary); }
+        .kpi-card.critical .value { color: var(--critical); }
+        .kpi-card.high .value { color: var(--high); }
+        .kpi-card.medium .value { color: var(--medium); }
+        .kpi-card.low .value { color: var(--low); }
+        .kpi-card.total .value { color: var(--accent-cyan); }
+
+        /* Charts Grid */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .chart-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+        }
+
+        .chart-card h3 {
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .chart-container { position: relative; height: 280px; }
+
+        /* Network Diagram */
+        .network-section {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+
+        .network-section h3 { font-size: 1rem; margin-bottom: 1rem; }
+
+        .network-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .network-zone {
+            border-radius: 8px;
+            padding: 1rem;
+            border: 2px dashed;
+        }
+
+        .network-zone.prod { border-color: var(--critical); background: rgba(239,68,68,0.05); }
+        .network-zone.corp { border-color: var(--high); background: rgba(249,115,22,0.05); }
+        .network-zone.mgmt { border-color: var(--accent-blue); background: rgba(59,130,246,0.05); }
+
+        .network-zone h4 {
+            font-size: 0.85rem;
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .network-zone.prod h4 { color: var(--critical); }
+        .network-zone.corp h4 { color: var(--high); }
+        .network-zone.mgmt h4 { color: var(--accent-blue); }
+
+        .service-item {
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            padding: 0.6rem 0.8rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .service-item:hover { background: rgba(0,0,0,0.4); }
+        .service-item .name { font-weight: 600; }
+        .service-item .vulns { color: var(--text-secondary); font-size: 0.75rem; }
+        .service-item .badge {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            margin-left: 0.25rem;
+        }
+        .badge.crit { background: var(--critical); color: white; }
+        .badge.high { background: var(--high); color: white; }
+        .badge.med { background: var(--medium); color: #1e293b; }
+        .badge.low { background: var(--low); color: #1e293b; }
+
+        /* Vulnerability Table */
+        .vuln-section {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+
+        .vuln-section h3 { font-size: 1rem; margin-bottom: 1rem; }
+
+        .filters {
+            display: flex;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .filters select, .filters input {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.8rem;
+        }
+
+        .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent-blue); }
+
+        .vuln-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+
+        .vuln-table th {
+            text-align: left;
+            padding: 0.75rem;
+            background: var(--bg-dark);
+            color: var(--text-secondary);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+            position: sticky;
+            top: 0;
+        }
+
+        .vuln-table td {
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        .vuln-table tr:hover td { background: rgba(59,130,246,0.05); }
+
+        .severity-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+        }
+
+        .severity-badge.CRITICAL { background: var(--critical); color: white; }
+        .severity-badge.HIGH { background: var(--high); color: white; }
+        .severity-badge.MEDIUM { background: var(--medium); color: #1e293b; }
+        .severity-badge.LOW { background: var(--low); color: #1e293b; }
+        .severity-badge.UNKNOWN { background: var(--unknown); color: white; }
+
+        .vuln-table-container { max-height: 500px; overflow-y: auto; }
+
+        /* Decision Panel */
+        .decision-section {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--accent-cyan);
+            margin-bottom: 1.5rem;
+        }
+
+        .decision-section h3 { color: var(--accent-cyan); font-size: 1rem; margin-bottom: 0.5rem; }
+        .decision-section p { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem; }
+
+        .decision-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .decision-form .field { display: flex; flex-direction: column; gap: 0.25rem; }
+        .decision-form label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; }
+
+        .decision-form select, .decision-form textarea, .decision-form input {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .decision-form .full-width { grid-column: 1 / -1; }
+
+        .btn {
+            background: var(--accent-blue);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 0.6rem 1.5rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn:hover { background: #2563eb; }
+        .btn.secondary { background: var(--bg-card-hover); }
+
+        /* Decision History */
+        .decision-history {
+            margin-top: 1rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .decision-item {
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.8rem;
+            border-left: 3px solid var(--accent-cyan);
+        }
+
+        /* No Data State */
+        .no-data {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-secondary);
+        }
+
+        .no-data .icon { font-size: 3rem; margin-bottom: 1rem; }
+        .no-data h3 { color: var(--text-primary); margin-bottom: 0.5rem; }
+        .no-data code {
+            background: var(--bg-dark);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 1.5rem;
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .charts-grid, .network-grid, .decision-form { grid-template-columns: 1fr; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .tab {
+            padding: 0.75rem 1.5rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover { color: var(--text-primary); }
+        .tab.active { color: var(--accent-cyan); border-bottom-color: var(--accent-cyan); }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1><span class="logo">&#9632;</span> VulnCorp — Dashboard de Vulnerabilidades</h1>
+            <div class="subtitle">Unidad 1: Gestión de Vulnerabilidades (MITRE) — Curso MAR303</div>
+        </div>
+        <div class="header-right">
+            <div id="scan-timestamp">Sin escaneos</div>
+            <div>Universidad Mayor — 2026</div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" data-tab="overview" onclick="switchTab('overview')">Resumen Ejecutivo</div>
+            <div class="tab" data-tab="network" onclick="switchTab('network')">Mapa de Red</div>
+            <div class="tab" data-tab="vulns" onclick="switchTab('vulns')">Vulnerabilidades</div>
+            <div class="tab" data-tab="decisions" onclick="switchTab('decisions')">Priorización</div>
+        </div>
+
+        <!-- TAB: Overview -->
+        <div id="tab-overview" class="tab-content active">
+            <div id="alert-banner" class="alert-banner" style="display:none;">
+                <div class="icon">&#9888;</div>
+                <div class="text">
+                    <strong id="alert-text">ALERTA</strong>
+                    <div id="alert-detail"></div>
+                </div>
+            </div>
+
+            <div class="kpi-grid" id="kpi-grid">
+                <div class="kpi-card total">
+                    <div class="label">Total Vulnerabilidades</div>
+                    <div class="value" id="kpi-total">—</div>
+                    <div class="detail" id="kpi-services">0 servicios escaneados</div>
+                </div>
+                <div class="kpi-card critical">
+                    <div class="label">Criticas</div>
+                    <div class="value" id="kpi-critical">—</div>
+                    <div class="detail">Explotación inmediata</div>
+                </div>
+                <div class="kpi-card high">
+                    <div class="label">Altas</div>
+                    <div class="value" id="kpi-high">—</div>
+                    <div class="detail">Requieren atención urgente</div>
+                </div>
+                <div class="kpi-card medium">
+                    <div class="label">Medias</div>
+                    <div class="value" id="kpi-medium">—</div>
+                    <div class="detail">Planificar remediación</div>
+                </div>
+                <div class="kpi-card low">
+                    <div class="label">Bajas</div>
+                    <div class="value" id="kpi-low">—</div>
+                    <div class="detail">Riesgo aceptable</div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>&#128202; Distribución por Severidad</h3>
+                    <div class="chart-container">
+                        <canvas id="severityChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>&#128203; Vulnerabilidades por Servicio</h3>
+                    <div class="chart-container">
+                        <canvas id="serviceChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>&#127919; Riesgo por Zona de Red</h3>
+                    <div class="chart-container">
+                        <canvas id="zoneChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <h3>&#128274; Exposición vs Criticidad</h3>
+                    <div class="chart-container">
+                        <canvas id="exposureChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: Network Map -->
+        <div id="tab-network" class="tab-content">
+            <div class="network-section">
+                <h3>&#127760; Arquitectura de Red — VulnCorp (PetaShop)</h3>
+                <div class="network-grid" id="network-grid">
+                    <div class="network-zone prod">
+                        <h4>&#128308; Red de Produccion (172.20.0.0/24)</h4>
+                        <div id="prod-services"></div>
+                    </div>
+                    <div class="network-zone corp">
+                        <h4>&#128992; Red Corporativa (172.21.0.0/24)</h4>
+                        <div id="corp-services"></div>
+                    </div>
+                    <div class="network-zone mgmt">
+                        <h4>&#128309; Red de Gestion (172.22.0.0/24)</h4>
+                        <div id="mgmt-services"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <h3>&#128679; Superficie de Ataque — Puntos Criticos</h3>
+                <div style="padding: 1rem;">
+                    <div id="attack-surface-analysis"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: Vulnerabilities -->
+        <div id="tab-vulns" class="tab-content">
+            <div class="vuln-section">
+                <h3>&#128270; Explorador de Vulnerabilidades</h3>
+                <div class="filters">
+                    <select id="filter-severity" onchange="filterVulns()">
+                        <option value="">Todas las severidades</option>
+                        <option value="CRITICAL">CRITICAL</option>
+                        <option value="HIGH">HIGH</option>
+                        <option value="MEDIUM">MEDIUM</option>
+                        <option value="LOW">LOW</option>
+                    </select>
+                    <select id="filter-service" onchange="filterVulns()">
+                        <option value="">Todos los servicios</option>
+                    </select>
+                    <select id="filter-fixable" onchange="filterVulns()">
+                        <option value="">Todos</option>
+                        <option value="true">Con fix disponible</option>
+                        <option value="false">Sin fix disponible</option>
+                    </select>
+                    <input type="text" id="filter-search" placeholder="Buscar CVE o paquete..." oninput="filterVulns()">
+                </div>
+                <div class="vuln-table-container">
+                    <table class="vuln-table">
+                        <thead>
+                            <tr>
+                                <th>CVE ID</th>
+                                <th>Severidad</th>
+                                <th>CVSS</th>
+                                <th>Servicio</th>
+                                <th>Paquete</th>
+                                <th>Version Instalada</th>
+                                <th>Fix Disponible</th>
+                                <th>Descripcion</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vuln-table-body">
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top:0.75rem; font-size:0.8rem; color:var(--text-secondary);">
+                    <span id="vuln-count">0</span> vulnerabilidades mostradas
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB: Decisions -->
+        <div id="tab-decisions" class="tab-content">
+            <div class="decision-section">
+                <h3>&#127919; Panel de Priorización — Ejercicio del Estudiante</h3>
+                <p>Analice las vulnerabilidades encontradas y registre sus decisiones de priorización. 
+                   Considere: exposición al exterior, criticidad del activo, datos sensibles, 
+                   disponibilidad de parche y costo de remediación.</p>
+                
+                <div class="decision-form">
+                    <div class="field">
+                        <label>Vulnerabilidad (CVE)</label>
+                        <input type="text" id="dec-cve" placeholder="Ej: CVE-2021-41773">
+                    </div>
+                    <div class="field">
+                        <label>Servicio Afectado</label>
+                        <select id="dec-service">
+                            <option value="">Seleccione...</option>
+                            <option value="nginx-proxy">nginx-proxy</option>
+                            <option value="prestashop">prestashop</option>
+                            <option value="mysql-prod">mysql-prod</option>
+                            <option value="redis-cache">redis-cache</option>
+                            <option value="phpmyadmin">phpmyadmin</option>
+                            <option value="workstation">workstation</option>
+                            <option value="ftp-server">ftp-server</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Prioridad Asignada</label>
+                        <select id="dec-priority">
+                            <option value="">Seleccione...</option>
+                            <option value="P1-Inmediata">P1 — Inmediata (24h)</option>
+                            <option value="P2-Urgente">P2 — Urgente (1 semana)</option>
+                            <option value="P3-Planificada">P3 — Planificada (30 dias)</option>
+                            <option value="P4-Aceptar">P4 — Aceptar riesgo</option>
+                            <option value="P5-Mitigar">P5 — Mitigar (control compensatorio)</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Costo Estimado de Remediación</label>
+                        <select id="dec-cost">
+                            <option value="">Seleccione...</option>
+                            <option value="bajo">Bajo (actualizar paquete)</option>
+                            <option value="medio">Medio (cambiar configuracion)</option>
+                            <option value="alto">Alto (rediseñar arquitectura)</option>
+                            <option value="muy-alto">Muy alto (migrar plataforma)</option>
+                        </select>
+                    </div>
+                    <div class="field full-width">
+                        <label>Justificación (¿Por qué esta prioridad?)</label>
+                        <textarea id="dec-justification" rows="3" placeholder="Explique su razonamiento considerando: exposición, datos en riesgo, EPSS, KEV, impacto al negocio..."></textarea>
+                    </div>
+                    <div class="field full-width" style="flex-direction:row; gap:0.5rem;">
+                        <button class="btn" onclick="saveDecision()">Registrar Decisión</button>
+                        <button class="btn secondary" onclick="exportDecisions()">Exportar Decisiones (JSON)</button>
+                    </div>
+                </div>
+
+                <div class="decision-history" id="decision-history">
+                    <h4 style="margin: 1rem 0 0.5rem; font-size:0.85rem; color:var(--text-secondary);">Historial de Decisiones</h4>
+                    <div id="decisions-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        VulnCorp Lab — Gestión de Vulnerabilidades (MITRE) — Curso MAR303 — Universidad Mayor — Profesor Tomás Vera — 2026<br>
+        Este entorno es exclusivamente educativo. No usar en producción.
+    </div>
+
+    <script>
+        let reportData = null;
+        let allVulns = [];
+        let charts = {};
+
+        // Tab switching
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+        }
+
+        // Load data
+        async function loadData() {
+            try {
+                const [reportRes, vulnsRes, decisionsRes] = await Promise.all([
+                    fetch('/api/report'),
+                    fetch('/api/vulnerabilities'),
+                    fetch('/api/decisions')
+                ]);
+
+                reportData = await reportRes.json();
+                allVulns = await vulnsRes.json();
+                const decisions = await decisionsRes.json();
+
+                if (reportData.scan_timestamp) {
+                    document.getElementById('scan-timestamp').textContent = 
+                        `Ultimo escaneo: ${reportData.scan_timestamp}`;
+                }
+
+                updateKPIs();
+                updateCharts();
+                updateNetworkMap();
+                updateVulnTable(allVulns);
+                updateAttackSurface();
+                updateDecisionsList(decisions);
+                populateServiceFilter();
+
+            } catch (err) {
+                console.error('Error loading data:', err);
+                showNoData();
+            }
+        }
+
+        function showNoData() {
+            document.getElementById('kpi-total').textContent = '0';
+            document.getElementById('kpi-critical').textContent = '0';
+            document.getElementById('kpi-high').textContent = '0';
+            document.getElementById('kpi-medium').textContent = '0';
+            document.getElementById('kpi-low').textContent = '0';
+        }
+
+        function updateKPIs() {
+            if (!reportData || !reportData.by_severity) return;
+
+            const sev = reportData.by_severity;
+            document.getElementById('kpi-total').textContent = reportData.total_vulnerabilities.toLocaleString();
+            document.getElementById('kpi-critical').textContent = sev.critical.toLocaleString();
+            document.getElementById('kpi-high').textContent = sev.high.toLocaleString();
+            document.getElementById('kpi-medium').textContent = sev.medium.toLocaleString();
+            document.getElementById('kpi-low').textContent = sev.low.toLocaleString();
+            document.getElementById('kpi-services').textContent = `${reportData.total_services} servicios escaneados`;
+
+            // Alert banner
+            if (sev.critical > 0) {
+                document.getElementById('alert-banner').style.display = 'flex';
+                document.getElementById('alert-text').textContent = 
+                    `${sev.critical} vulnerabilidades CRITICAS detectadas`;
+                document.getElementById('alert-detail').textContent = 
+                    `Se encontraron ${reportData.total_vulnerabilities} vulnerabilidades en ${reportData.total_services} servicios. Requiere atención inmediata.`;
+            }
+        }
+
+        function updateCharts() {
+            if (!reportData || !reportData.services) return;
+
+            const sev = reportData.by_severity;
+
+            // Severity Doughnut
+            if (charts.severity) charts.severity.destroy();
+            charts.severity = new Chart(document.getElementById('severityChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: ['Critical', 'High', 'Medium', 'Low'],
+                    datasets: [{
+                        data: [sev.critical, sev.high, sev.medium, sev.low],
+                        backgroundColor: ['#ef4444', '#f97316', '#eab308', '#22c55e'],
+                        borderColor: '#1e293b',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right', labels: { color: '#94a3b8', padding: 15 } }
+                    }
+                }
+            });
+
+            // Service Bar Chart
+            if (charts.service) charts.service.destroy();
+            const serviceNames = reportData.services.map(s => s.service);
+            charts.service = new Chart(document.getElementById('serviceChart'), {
+                type: 'bar',
+                data: {
+                    labels: serviceNames,
+                    datasets: [
+                        { label: 'Critical', data: reportData.services.map(s => s.critical), backgroundColor: '#ef4444' },
+                        { label: 'High', data: reportData.services.map(s => s.high), backgroundColor: '#f97316' },
+                        { label: 'Medium', data: reportData.services.map(s => s.medium), backgroundColor: '#eab308' },
+                        { label: 'Low', data: reportData.services.map(s => s.low), backgroundColor: '#22c55e' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                        y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#94a3b8' } }
+                    }
+                }
+            });
+
+            // Zone Risk Chart
+            if (charts.zone) charts.zone.destroy();
+            const zones = {};
+            reportData.services.forEach(s => {
+                const zone = s.zone || 'desconocida';
+                if (!zones[zone]) zones[zone] = { critical: 0, high: 0, medium: 0, low: 0 };
+                zones[zone].critical += s.critical;
+                zones[zone].high += s.high;
+                zones[zone].medium += s.medium;
+                zones[zone].low += s.low;
+            });
+
+            charts.zone = new Chart(document.getElementById('zoneChart'), {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(zones),
+                    datasets: [
+                        { label: 'Critical', data: Object.values(zones).map(z => z.critical), backgroundColor: '#ef4444' },
+                        { label: 'High', data: Object.values(zones).map(z => z.high), backgroundColor: '#f97316' },
+                        { label: 'Medium', data: Object.values(zones).map(z => z.medium), backgroundColor: '#eab308' },
+                        { label: 'Low', data: Object.values(zones).map(z => z.low), backgroundColor: '#22c55e' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    scales: {
+                        x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                        y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                    },
+                    plugins: { legend: { labels: { color: '#94a3b8' } } }
+                }
+            });
+
+            // Exposure Bubble Chart
+            if (charts.exposure) charts.exposure.destroy();
+            const exposureMap = { 'internet': 4, 'internet-via-proxy': 3, 'red-interna': 2, 'interna': 1 };
+            const criticalityMap = { 'critica': 4, 'alta': 3, 'media': 2, 'baja': 1 };
+
+            charts.exposure = new Chart(document.getElementById('exposureChart'), {
+                type: 'bubble',
+                data: {
+                    datasets: reportData.services.map(s => ({
+                        label: s.service,
+                        data: [{
+                            x: exposureMap[s.exposure] || 1,
+                            y: criticalityMap[s.criticality] || 1,
+                            r: Math.max(Math.sqrt(s.total) * 2, 5)
+                        }],
+                        backgroundColor: s.critical > 0 ? 'rgba(239,68,68,0.6)' : 
+                                        s.high > 10 ? 'rgba(249,115,22,0.6)' : 'rgba(59,130,246,0.6)'
+                    }))
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Exposicion', color: '#94a3b8' },
+                            ticks: {
+                                color: '#94a3b8',
+                                callback: v => ['', 'Interna', 'Red Interna', 'Via Proxy', 'Internet'][v] || ''
+                            },
+                            min: 0, max: 5,
+                            grid: { color: '#334155' }
+                        },
+                        y: {
+                            title: { display: true, text: 'Criticidad del Activo', color: '#94a3b8' },
+                            ticks: {
+                                color: '#94a3b8',
+                                callback: v => ['', 'Baja', 'Media', 'Alta', 'Critica'][v] || ''
+                            },
+                            min: 0, max: 5,
+                            grid: { color: '#334155' }
+                        }
+                    },
+                    plugins: { legend: { labels: { color: '#94a3b8' } } }
+                }
+            });
+        }
+
+        function updateNetworkMap() {
+            if (!reportData || !reportData.services) return;
+
+            const zoneMapping = {
+                'produccion': 'prod-services',
+                'corporativa': 'corp-services',
+                'produccion+corporativa': 'prod-services',
+                'gestion': 'mgmt-services'
+            };
+
+            // Clear
+            ['prod-services', 'corp-services', 'mgmt-services'].forEach(id => {
+                document.getElementById(id).innerHTML = '';
+            });
+
+            reportData.services.forEach(s => {
+                const containerId = zoneMapping[s.zone] || 'mgmt-services';
+                const container = document.getElementById(containerId);
+
+                const div = document.createElement('div');
+                div.className = 'service-item';
+                div.innerHTML = `
+                    <div class="name">${s.service} 
+                        ${s.critical > 0 ? `<span class="badge crit">${s.critical} CRIT</span>` : ''}
+                        ${s.high > 0 ? `<span class="badge high">${s.high} HIGH</span>` : ''}
+                    </div>
+                    <div class="vulns">${s.image} — ${s.total} vulns total</div>
+                `;
+                div.onclick = () => {
+                    document.getElementById('filter-service').value = s.service;
+                    filterVulns();
+                    switchTab('vulns');
+                };
+                container.appendChild(div);
+
+                // If service is in both zones
+                if (s.zone === 'produccion+corporativa') {
+                    const div2 = div.cloneNode(true);
+                    div2.onclick = div.onclick;
+                    document.getElementById('corp-services').appendChild(div2);
+                }
+            });
+
+            // Add dashboard to mgmt
+            const dashDiv = document.createElement('div');
+            dashDiv.className = 'service-item';
+            dashDiv.innerHTML = `<div class="name">vuln-dashboard</div><div class="vulns">Este dashboard — Red de gestion</div>`;
+            document.getElementById('mgmt-services').appendChild(dashDiv);
+        }
+
+        function updateAttackSurface() {
+            if (!reportData || !reportData.services) return;
+
+            const analysis = document.getElementById('attack-surface-analysis');
+            const findings = [];
+
+            reportData.services.forEach(s => {
+                if (s.exposure === 'internet' && s.critical > 0) {
+                    findings.push({
+                        level: 'CRITICAL',
+                        text: `<strong>${s.service}</strong> esta expuesto a Internet y tiene ${s.critical} vulnerabilidades criticas. Vector de ataque directo.`,
+                        color: '#ef4444'
+                    });
+                }
+                if (s.zone === 'produccion+corporativa') {
+                    findings.push({
+                        level: 'HIGH',
+                        text: `<strong>${s.service}</strong> conecta la red de produccion con la corporativa. Punto de pivoteo para movimiento lateral.`,
+                        color: '#f97316'
+                    });
+                }
+                if (s.service === 'phpmyadmin') {
+                    findings.push({
+                        level: 'HIGH',
+                        text: `<strong>phpMyAdmin</strong> con acceso root a la base de datos de produccion desde la red corporativa. Error arquitectonico critico.`,
+                        color: '#f97316'
+                    });
+                }
+                if (s.service === 'ftp-server') {
+                    findings.push({
+                        level: 'MEDIUM',
+                        text: `<strong>FTP Server</strong> transmite credenciales en texto plano. Susceptible a sniffing en la red corporativa.`,
+                        color: '#eab308'
+                    });
+                }
+            });
+
+            if (findings.length === 0) {
+                analysis.innerHTML = '<p style="color:var(--text-secondary)">Ejecute el escaneo para ver el analisis de superficie de ataque.</p>';
+                return;
+            }
+
+            analysis.innerHTML = findings.map(f => `
+                <div style="padding:0.75rem; margin-bottom:0.5rem; border-left:3px solid ${f.color}; background:rgba(0,0,0,0.2); border-radius:0 6px 6px 0;">
+                    <span class="severity-badge ${f.level}">${f.level}</span>
+                    <span style="margin-left:0.5rem; font-size:0.85rem;">${f.text}</span>
+                </div>
+            `).join('');
+        }
+
+        function updateVulnTable(vulns) {
+            const tbody = document.getElementById('vuln-table-body');
+            const searchTerm = document.getElementById('filter-search').value.toLowerCase();
+
+            let filtered = vulns;
+            if (searchTerm) {
+                filtered = filtered.filter(v => 
+                    v.vulnerability_id.toLowerCase().includes(searchTerm) ||
+                    v.package_name.toLowerCase().includes(searchTerm) ||
+                    (v.title && v.title.toLowerCase().includes(searchTerm))
+                );
+            }
+
+            // Limit to 500 for performance
+            const display = filtered.slice(0, 500);
+
+            tbody.innerHTML = display.map(v => `
+                <tr>
+                    <td><a href="https://nvd.nist.gov/vuln/detail/${v.vulnerability_id}" target="_blank" style="color:var(--accent-cyan); text-decoration:none;">${v.vulnerability_id}</a></td>
+                    <td><span class="severity-badge ${v.severity}">${v.severity}</span></td>
+                    <td>${v.cvss_score ? v.cvss_score.toFixed(1) : '—'}</td>
+                    <td>${v.service}</td>
+                    <td>${v.package_name}</td>
+                    <td style="font-family:monospace; font-size:0.75rem;">${v.installed_version}</td>
+                    <td style="font-family:monospace; font-size:0.75rem; ${v.fixed_version !== 'Sin fix disponible' ? 'color:var(--low)' : 'color:var(--text-secondary)'}">${v.fixed_version}</td>
+                    <td style="max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${v.description}">${v.title || v.description || '—'}</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('vuln-count').textContent = 
+                `${filtered.length}${filtered.length > 500 ? ' (mostrando 500)' : ''}`;
+        }
+
+        function populateServiceFilter() {
+            const select = document.getElementById('filter-service');
+            if (!reportData || !reportData.services) return;
+            reportData.services.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.service;
+                opt.textContent = s.service;
+                select.appendChild(opt);
+            });
+        }
+
+        async function filterVulns() {
+            const severity = document.getElementById('filter-severity').value;
+            const service = document.getElementById('filter-service').value;
+            const fixable = document.getElementById('filter-fixable').value;
+
+            let url = '/api/vulnerabilities?';
+            if (severity) url += `severity=${severity}&`;
+            if (service) url += `service=${service}&`;
+            if (fixable) url += `fixable=${fixable}&`;
+
+            try {
+                const res = await fetch(url);
+                const vulns = await res.json();
+                updateVulnTable(vulns);
+            } catch (err) {
+                console.error('Error filtering:', err);
+            }
+        }
+
+        async function saveDecision() {
+            const decision = {
+                cve: document.getElementById('dec-cve').value,
+                service: document.getElementById('dec-service').value,
+                priority: document.getElementById('dec-priority').value,
+                cost: document.getElementById('dec-cost').value,
+                justification: document.getElementById('dec-justification').value
+            };
+
+            if (!decision.cve || !decision.priority || !decision.justification) {
+                alert('Complete al menos: CVE, Prioridad y Justificacion');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/decisions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(decision)
+                });
+                const result = await res.json();
+                
+                // Clear form
+                document.getElementById('dec-cve').value = '';
+                document.getElementById('dec-justification').value = '';
+
+                // Reload decisions
+                const decisionsRes = await fetch('/api/decisions');
+                const decisions = await decisionsRes.json();
+                updateDecisionsList(decisions);
+
+            } catch (err) {
+                console.error('Error saving decision:', err);
+                alert('Error al guardar la decision');
+            }
+        }
+
+        function updateDecisionsList(decisions) {
+            const list = document.getElementById('decisions-list');
+            if (!decisions || decisions.length === 0) {
+                list.innerHTML = '<p style="color:var(--text-secondary); font-size:0.8rem;">No hay decisiones registradas aun.</p>';
+                return;
+            }
+
+            list.innerHTML = decisions.reverse().map(d => `
+                <div class="decision-item">
+                    <strong>${d.cve}</strong> — ${d.service || 'N/A'} — 
+                    <span style="color:var(--accent-cyan)">${d.priority}</span> — 
+                    Costo: ${d.cost || 'N/A'}<br>
+                    <em style="color:var(--text-secondary)">${d.justification}</em><br>
+                    <small style="color:var(--unknown)">${d.timestamp}</small>
+                </div>
+            `).join('');
+        }
+
+        async function exportDecisions() {
+            try {
+                const res = await fetch('/api/decisions');
+                const decisions = await res.json();
+                const blob = new Blob([JSON.stringify(decisions, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'vulncorp_decisions.json';
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                alert('Error al exportar');
+            }
+        }
+
+        // Initialize
+        loadData();
+
+        // Auto-refresh every 30 seconds
+        setInterval(loadData, 30000);
+    </script>
+</body>
+</html>
