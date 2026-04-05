@@ -16,5 +16,15 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Lab 02 - Datos generados localmente
+lab02-pipeline/data/sbom/*.json
+lab02-pipeline/data/sbom/*.xml
+lab02-pipeline/data/sbom/*.txt
+lab02-pipeline/data/grype/*.json
+lab02-pipeline/data/grype/*.jsonl
+lab02-pipeline/data/grype/*.txt
+__pycache__/
+*.pyc
+
 # Logs
 *.log

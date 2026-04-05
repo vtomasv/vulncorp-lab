@@ -1,0 +1,132 @@
+{
+  "_COMENTARIO_01": "=== ESTRUCTURA DE UN SBOM CycloneDX (Versión 1.5) ===",
+  "_COMENTARIO_02": "Este archivo es un ejemplo ANOTADO para fines educativos.",
+  "_COMENTARIO_03": "Los campos _COMENTARIO_XX no son parte del estándar.",
+
+  "bomFormat": "CycloneDX",
+  "_NOTA_bomFormat": "Siempre 'CycloneDX'. Identifica el estándar usado.",
+
+  "specVersion": "1.5",
+  "_NOTA_specVersion": "Versión del estándar CycloneDX. 1.5 es la más reciente estable.",
+
+  "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+  "_NOTA_serialNumber": "UUID único que identifica ESTE SBOM específico. Cambia en cada generación.",
+
+  "version": 1,
+  "_NOTA_version": "Versión del BOM. Se incrementa si se re-genera para el mismo software.",
+
+  "metadata": {
+    "_NOTA_metadata": "Información sobre QUIÉN generó el SBOM, CUÁNDO y con QUÉ herramienta.",
+    "timestamp": "2026-04-05T10:30:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "syft",
+          "version": "1.18.1",
+          "publisher": "anchore",
+          "_NOTA": "Syft es la herramienta que generó este SBOM."
+        }
+      ]
+    },
+    "component": {
+      "type": "container",
+      "name": "prestashop/prestashop",
+      "version": "1.7.8.0",
+      "_NOTA": "El componente raíz: la imagen Docker que estamos describiendo."
+    }
+  },
+
+  "components": [
+    {
+      "_NOTA_componente": "=== COMPONENTE 1: Un paquete del sistema operativo ===",
+      "type": "library",
+      "_NOTA_type": "Tipos posibles: application, framework, library, container, device, firmware, file, operating-system",
+      "name": "openssl",
+      "version": "1.1.1n-0+deb11u5",
+      "purl": "pkg:deb/debian/openssl@1.1.1n-0+deb11u5?arch=amd64&distro=debian-11",
+      "_NOTA_purl": "Package URL (PURL): formato universal para identificar paquetes. Estructura: pkg:tipo/namespace/nombre@version?qualifiers",
+      "cpe": "cpe:2.3:a:openssl:openssl:1.1.1n:*:*:*:*:*:*:*",
+      "_NOTA_cpe": "Common Platform Enumeration: otro identificador estándar usado por NVD.",
+      "licenses": [
+        {
+          "license": {
+            "id": "OpenSSL",
+            "_NOTA": "Identificador SPDX de la licencia."
+          }
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a1b2c3d4e5f6...",
+          "_NOTA": "Hash criptográfico para verificar integridad del paquete."
+        }
+      ],
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "dpkg-db-cataloger",
+          "_NOTA": "Metadato de Syft: cómo encontró este paquete (catálogo dpkg)."
+        }
+      ]
+    },
+    {
+      "_NOTA_componente": "=== COMPONENTE 2: Una librería PHP ===",
+      "type": "library",
+      "name": "symfony/http-kernel",
+      "version": "4.4.48",
+      "purl": "pkg:composer/symfony/http-kernel@4.4.48",
+      "_NOTA_purl": "Nótese el tipo 'composer' (gestor de paquetes PHP).",
+      "group": "symfony",
+      "_NOTA_group": "Grupo o namespace del paquete (organización)."
+    },
+    {
+      "_NOTA_componente": "=== COMPONENTE 3: Una librería JavaScript ===",
+      "type": "library",
+      "name": "jquery",
+      "version": "3.5.1",
+      "purl": "pkg:npm/jquery@3.5.1",
+      "_NOTA_purl": "Tipo 'npm' indica que es un paquete Node.js/JavaScript."
+    }
+  ],
+
+  "_NOTA_vulnerabilities": "=== SECCIÓN DE VULNERABILIDADES (opcional en SBOM, presente en resultados de Grype) ===",
+  "vulnerabilities": [
+    {
+      "id": "CVE-2022-0778",
+      "_NOTA_id": "Identificador CVE de la vulnerabilidad.",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-0778"
+      },
+      "ratings": [
+        {
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv31",
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+          "_NOTA": "CVSS v3.1: puntuación 7.5 (HIGH). Vector indica: acceso por red, sin privilegios, impacto en disponibilidad."
+        }
+      ],
+      "cwes": [835],
+      "_NOTA_cwes": "CWE-835: Loop with Unreachable Exit Condition (Infinite Loop). Clasifica la DEBILIDAD raíz.",
+      "description": "Infinite loop in BN_mod_sqrt() function when parsing certificates with a crafted elliptic curve parameter.",
+      "recommendation": "Actualizar OpenSSL a versión 1.1.1n o superior.",
+      "affects": [
+        {
+          "ref": "openssl@1.1.1k",
+          "_NOTA": "Referencia al componente afectado dentro de este SBOM."
+        }
+      ]
+    }
+  ],
+
+  "_NOTA_FINAL_01": "=== CONCEPTOS CLAVE PARA EL ESTUDIANTE ===",
+  "_NOTA_FINAL_02": "1. SBOM = Lista de ingredientes del software (como la etiqueta nutricional)",
+  "_NOTA_FINAL_03": "2. CycloneDX es el FORMATO del SBOM (como PDF es un formato de documento)",
+  "_NOTA_FINAL_04": "3. PURL es el identificador universal de cada 'ingrediente'",
+  "_NOTA_FINAL_05": "4. Las vulnerabilidades se agregan cuando se ESCANEA el SBOM (ej: con Grype)",
+  "_NOTA_FINAL_06": "5. El SBOM sin vulnerabilidades es un INVENTARIO; con vulnerabilidades es un REPORTE",
+  "_NOTA_FINAL_07": "6. Formatos alternativos: SPDX (Linux Foundation), SWID (ISO/IEC 19770-2)"
+}

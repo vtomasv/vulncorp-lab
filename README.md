@@ -144,7 +144,7 @@ docker compose down -v
 
 ```
 vulncorp-lab/
-├── docker-compose.yml          # Infraestructura completa
+├── docker-compose.yml          # Lab 01: Infraestructura VulnCorp PetaShop
 ├── README.md                   # Este archivo
 ├── config/
 │   └── nginx/
@@ -160,8 +160,23 @@ vulncorp-lab/
 │   └── scan.sh                 # Escaneo de vulnerabilidades
 ├── data/                       # Reportes generados (gitignored)
 ├── docs/
-│   ├── LAB_01_STUDENT.md       # Guía del estudiante
-│   └── LAB_01_INSTRUCTOR.md    # Guía del instructor (soluciones)
+│   ├── LAB_01_STUDENT.md       # Guía del estudiante (Lab 01)
+│   └── LAB_01_INSTRUCTOR.md    # Guía del instructor (Lab 01)
+├── lab02-pipeline/             # Lab 02: Pipeline profesional
+│   ├── docker-compose.yml      # Dependency-Track + DefectDojo
+│   ├── README.md               # Documentación del Lab 02
+│   ├── scripts/
+│   │   ├── setup_lab02.sh      # Setup (Syft + Grype + plataformas)
+│   │   ├── generate_sbom.sh    # Genera SBOMs con Syft (CycloneDX)
+│   │   ├── scan_grype.sh       # Escanea con Grype
+│   │   └── upload_reports.py   # Sube a DTrack y DefectDojo
+│   ├── data/
+│   │   ├── sbom/               # SBOMs generados
+│   │   ├── grype/              # Reportes de Grype
+│   │   └── cyclonedx-examples/ # Ejemplo anotado de CycloneDX
+│   └── docs/
+│       ├── LAB_02_STUDENT.md   # Guía del estudiante (Lab 02)
+│       └── LAB_02_INSTRUCTOR.md# Guía del instructor (Lab 02)
 └── .gitignore
 ```
 
@@ -192,4 +207,4 @@ Este material es de uso exclusivamente educativo, creado para el curso MAR303 de
 
 - **Profesor:** Tomás Vera — Universidad Mayor — 2026
 - **Frameworks de referencia:** MITRE ATT&CK, CVE, CVSS, EPSS, CISA KEV
-- **Herramientas:** Trivy (Aqua Security), Docker, PrestaShop, MariaDB
+- **Herramientas:** Trivy (Aqua Security), Syft, Grype (Anchore), Dependency-Track (OWASP), DefectDojo, Docker, PrestaShop, MariaDB
