@@ -84,12 +84,21 @@ docker compose ps
 
 Cuando todos los servicios muestren estado "Up" o "running", continúe.
 
+### Paso 1.3b: Obtener la contraseña de DefectDojo
+DefectDojo genera una contraseña aleatoria para el usuario admin en la primera ejecución. El script `setup_lab02.sh` intenta capturarla automáticamente y guardarla en `data/.dd_admin_password`. Si no la capturó, obténgala manualmente:
+
+```bash
+docker logs vulncorp-dd-initializer 2>&1 | grep -i password
+```
+
+Anote la contraseña, la necesitará para acceder a la plataforma.
+
 ### Paso 1.4: Verificar acceso a las plataformas
 
 | Plataforma | URL | Credenciales |
 |------------|-----|-------------|
 | Dependency-Track | http://localhost:8083 | admin / admin |
-| DefectDojo | http://localhost:8085 | admin / VulnCorp2024! |
+| DefectDojo | http://localhost:8085 | admin / (contraseña del paso 1.3b) |
 
 **Evidencia 1:** Tome una captura de pantalla del login exitoso en ambas plataformas.
 

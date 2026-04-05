@@ -25,6 +25,7 @@ lab02-pipeline/data/grype/*.jsonl
 lab02-pipeline/data/grype/*.txt
 __pycache__/
 *.pyc
+.dd_admin_password
 
 # Logs
 *.log

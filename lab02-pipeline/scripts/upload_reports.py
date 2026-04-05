@@ -45,7 +45,7 @@ DTRACK_API_KEY = os.environ.get("DTRACK_API_KEY", "")
 # DefectDojo
 DOJO_URL = os.environ.get("DOJO_URL", "http://localhost:8085")
 DOJO_USER = os.environ.get("DOJO_USER", "admin")
-DOJO_PASSWORD = os.environ.get("DOJO_PASSWORD", "VulnCorp2024!")
+DOJO_PASSWORD = os.environ.get("DOJO_PASSWORD", "")
 DOJO_TOKEN = os.environ.get("DOJO_TOKEN", "")
 
 # Mapeo de servicios a metadatos
@@ -182,6 +182,58 @@ def dtrack_upload_sbom(service_key, sbom_file):
 #  DEFECTDOJO
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _resolve_dojo_password():
+    """
+    Resuelve la contraseña de DefectDojo en este orden:
+    1. Variable de entorno DOJO_PASSWORD
+    2. Archivo data/.dd_admin_password (generado por setup_lab02.sh)
+    3. Logs del contenedor initializer
+    4. Solicitar al usuario
+    """
+    global DOJO_PASSWORD
+
+    if DOJO_PASSWORD:
+        return DOJO_PASSWORD
+
+    # Intentar leer del archivo generado por setup
+    pw_file = os.path.join(LAB02_DIR, "data", ".dd_admin_password")
+    if os.path.exists(pw_file):
+        with open(pw_file, "r") as f:
+            pw = f.read().strip()
+            if pw:
+                DOJO_PASSWORD = pw
+                print(f"  {C.CYAN}[i] Contraseña leída de data/.dd_admin_password{C.NC}")
+                return DOJO_PASSWORD
+
+    # Intentar obtener de los logs del initializer
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["docker", "logs", "vulncorp-dd-initializer"],
+            capture_output=True, text=True, timeout=10
+        )
+        logs = result.stdout + result.stderr
+        for line in logs.splitlines():
+            if "password" in line.lower() and "admin" in line.lower():
+                # Extraer la contraseña del log
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    pw = parts[-1].strip()
+                    if pw:
+                        DOJO_PASSWORD = pw
+                        print(f"  {C.CYAN}[i] Contraseña obtenida de los logs del initializer{C.NC}")
+                        return DOJO_PASSWORD
+    except Exception:
+        pass
+
+    # Solicitar al usuario
+    print(f"  {C.YELLOW}[!] No se encontró la contraseña de DefectDojo automáticamente.{C.NC}")
+    print(f"      Puede obtenerla ejecutando:")
+    print(f"      {C.CYAN}docker logs vulncorp-dd-initializer 2>&1 | grep -i password{C.NC}")
+    DOJO_PASSWORD = input(f"  Ingrese la contraseña de admin de DefectDojo: ").strip()
+    return DOJO_PASSWORD
+
+
 def dojo_get_token():
     """Obtiene un token de autenticación de DefectDojo."""
     global DOJO_TOKEN
@@ -191,10 +243,15 @@ def dojo_get_token():
 
     print(f"  {C.YELLOW}[i] Obteniendo token de DefectDojo...{C.NC}")
 
+    password = _resolve_dojo_password()
+    if not password:
+        print(f"  {C.RED}[✗] No se proporcionó contraseña de DefectDojo{C.NC}")
+        return None
+
     try:
         resp = requests.post(
             f"{DOJO_URL}/api/v2/api-token-auth/",
-            json={"username": DOJO_USER, "password": DOJO_PASSWORD},
+            json={"username": DOJO_USER, "password": password},
             timeout=10
         )
         if resp.status_code == 200:
@@ -203,6 +260,8 @@ def dojo_get_token():
             return DOJO_TOKEN
         else:
             print(f"  {C.RED}[✗] Login fallido en DefectDojo (HTTP {resp.status_code}){C.NC}")
+            print(f"      Verifique la contraseña. Puede obtenerla con:")
+            print(f"      {C.CYAN}docker logs vulncorp-dd-initializer 2>&1 | grep -i password{C.NC}")
             return None
     except requests.exceptions.ConnectionError:
         print(f"  {C.RED}[✗] No se puede conectar a DefectDojo en {DOJO_URL}{C.NC}")

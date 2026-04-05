@@ -11,7 +11,11 @@
 #    3. Dependency-Track — Análisis continuo de SBOM
 #    4. DefectDojo        — Gestión centralizada de vulnerabilidades
 #
-#  Compatible con: AMD64 (Intel/AMD) y ARM64 (Apple Silicon M1/M2/M3/M4)
+#  Compatible con:
+#    - macOS ARM64 (Apple Silicon M1/M2/M3/M4)
+#    - macOS AMD64 (Intel)
+#    - Linux AMD64 / ARM64
+#    - Windows (via WSL2 + Docker Desktop)
 ###############################################################################
 
 set -e
@@ -38,6 +42,11 @@ echo ""
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 echo -e "  [i] Arquitectura: ${BOLD}${ARCH}${NC} | SO: ${BOLD}${OS}${NC}"
+
+# Detectar si estamos en WSL
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    echo -e "  [i] Entorno: ${BOLD}WSL2 (Windows)${NC}"
+fi
 echo ""
 
 # ===================== 1. INSTALAR SYFT =====================
@@ -117,6 +126,46 @@ echo ""
 cd "$LAB02_DIR"
 docker compose up -d 2>&1
 
+# ===================== ESPERAR Y CAPTURAR CONTRASEÑA DE DEFECTDOJO =====================
+echo ""
+echo -e "${YELLOW}  Esperando a que DefectDojo complete la inicialización...${NC}"
+echo -e "${YELLOW}  (La contraseña del admin se genera automáticamente)${NC}"
+echo ""
+
+DD_PASSWORD=""
+MAX_WAIT=180  # 3 minutos máximo
+ELAPSED=0
+
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    # Verificar si el initializer terminó
+    INIT_STATUS=$(docker inspect --format='{{.State.Status}}' vulncorp-dd-initializer 2>/dev/null || echo "not_found")
+
+    if [ "$INIT_STATUS" = "exited" ]; then
+        # Buscar la contraseña en los logs del initializer
+        DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -oP '(?<=Admin password: ).*' || \
+                      docker logs vulncorp-dd-initializer 2>&1 | grep -i "password" | grep -oP ':\s*\K\S+$' || \
+                      echo "")
+
+        if [ -z "$DD_PASSWORD" ]; then
+            # Intentar otro patrón de captura
+            DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -i "admin" | grep -i "pass" | tail -1 | sed 's/.*: //')
+        fi
+        break
+    fi
+
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    printf "  Esperando... (%ds/%ds)\r" "$ELAPSED" "$MAX_WAIT"
+done
+
+echo ""
+
+# Guardar la contraseña en un archivo local
+if [ -n "$DD_PASSWORD" ]; then
+    echo "$DD_PASSWORD" > "$LAB02_DIR/data/.dd_admin_password"
+    chmod 600 "$LAB02_DIR/data/.dd_admin_password"
+fi
+
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}${BOLD}║  [✓] Setup del Lab 02 completado                            ║${NC}"
@@ -132,10 +181,17 @@ echo -e "      Credenciales:   admin / admin"
 echo -e "      (Cambiar en el primer login)"
 echo -e ""
 echo -e "    DefectDojo:       ${CYAN}http://localhost:8085${NC}"
-echo -e "      Credenciales:   admin / VulnCorp2024!"
+if [ -n "$DD_PASSWORD" ]; then
+    echo -e "      Credenciales:   admin / ${BOLD}${DD_PASSWORD}${NC}"
+    echo -e "      ${YELLOW}(Contraseña guardada en data/.dd_admin_password)${NC}"
+else
+    echo -e "      ${YELLOW}Credenciales: La contraseña se genera automáticamente.${NC}"
+    echo -e "      ${YELLOW}Para obtenerla ejecute:${NC}"
+    echo -e "      ${CYAN}docker logs vulncorp-dd-initializer 2>&1 | grep -i password${NC}"
+fi
 echo ""
 echo -e "  ${BOLD}Próximos pasos:${NC}"
-echo -e "    ${CYAN}1.${NC} Espere ~3-5 min a que las plataformas inicialicen"
+echo -e "    ${CYAN}1.${NC} Verifique que las plataformas estén listas: ${BOLD}docker compose ps${NC}"
 echo -e "    ${CYAN}2.${NC} Genere los SBOMs:       ${BOLD}./scripts/generate_sbom.sh${NC}"
 echo -e "    ${CYAN}3.${NC} Escanee con Grype:      ${BOLD}./scripts/scan_grype.sh${NC}"
 echo -e "    ${CYAN}4.${NC} Suba a las plataformas: ${BOLD}python3 scripts/upload_reports.py${NC}"
