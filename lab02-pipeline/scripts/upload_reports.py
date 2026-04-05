@@ -21,6 +21,7 @@ import time
 import base64
 import glob
 import argparse
+import subprocess
 from datetime import datetime
 
 try:
@@ -41,6 +42,8 @@ GRYPE_DIR = os.path.join(LAB02_DIR, "data", "grype")
 # Dependency-Track
 DTRACK_URL = os.environ.get("DTRACK_URL", "http://localhost:8084")
 DTRACK_API_KEY = os.environ.get("DTRACK_API_KEY", "")
+# Contraseña nueva para Dependency-Track (se cambia en el primer login)
+DTRACK_NEW_PASSWORD = os.environ.get("DTRACK_NEW_PASSWORD", "VulnCorp2026!")
 
 # DefectDojo
 DOJO_URL = os.environ.get("DOJO_URL", "http://localhost:8085")
@@ -83,11 +86,60 @@ def banner():
 #  DEPENDENCY-TRACK
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _dtrack_force_change_password():
+    """
+    En Dependency-Track, el primer login con admin/admin REQUIERE
+    un cambio de contraseña obligatorio vía el endpoint forceChangePassword.
+    Retorna True si el cambio fue exitoso o ya se hizo previamente.
+    """
+    print(f"  {C.YELLOW}[i] Intentando cambio de contraseña obligatorio (primer login)...{C.NC}")
+    try:
+        resp = requests.post(
+            f"{DTRACK_URL}/api/v1/user/forceChangePassword",
+            data={
+                "username": "admin",
+                "password": "admin",
+                "newPassword": DTRACK_NEW_PASSWORD,
+                "confirmPassword": DTRACK_NEW_PASSWORD,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            print(f"  {C.GREEN}[✓] Contraseña de DTrack cambiada a: {DTRACK_NEW_PASSWORD}{C.NC}")
+            return True
+        elif resp.status_code == 401:
+            # Ya se cambió la contraseña previamente, intentar login con la nueva
+            print(f"  {C.CYAN}[i] La contraseña ya fue cambiada previamente.{C.NC}")
+            return True
+        else:
+            print(f"  {C.YELLOW}[!] forceChangePassword retornó HTTP {resp.status_code}: {resp.text[:200]}{C.NC}")
+            return True  # Continuar intentando login
+    except requests.exceptions.ConnectionError:
+        print(f"  {C.RED}[✗] No se puede conectar a Dependency-Track en {DTRACK_URL}{C.NC}")
+        return False
+
+
+def _dtrack_login(password):
+    """Intenta hacer login en Dependency-Track y retorna el JWT token."""
+    try:
+        resp = requests.post(
+            f"{DTRACK_URL}/api/v1/user/login",
+            data=f"username=admin&password={requests.utils.quote(password)}",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            return resp.text.strip()
+        return None
+    except requests.exceptions.ConnectionError:
+        return None
+
+
 def dtrack_get_api_key():
     """
     Obtiene un API key de Dependency-Track.
-    En la primera ejecución, usa las credenciales default (admin/admin)
-    para extraer el API key del equipo 'Administrators'.
+    Maneja el cambio de contraseña obligatorio del primer login.
     """
     global DTRACK_API_KEY
 
@@ -96,39 +148,83 @@ def dtrack_get_api_key():
 
     print(f"  {C.YELLOW}[i] Obteniendo API key de Dependency-Track...{C.NC}")
 
-    # Login con credenciales default para obtener JWT
-    try:
-        resp = requests.post(
-            f"{DTRACK_URL}/api/v1/user/login",
-            data="username=admin&password=admin",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10
-        )
-        if resp.status_code != 200:
-            print(f"  {C.RED}[✗] Login fallido (HTTP {resp.status_code}). ¿Cambió la contraseña?{C.NC}")
-            print(f"      Si cambió la contraseña, establezca DTRACK_API_KEY manualmente.")
-            return None
-        jwt_token = resp.text.strip()
-    except requests.exceptions.ConnectionError:
-        print(f"  {C.RED}[✗] No se puede conectar a Dependency-Track en {DTRACK_URL}{C.NC}")
-        print(f"      Verifique que esté corriendo: docker compose ps")
-        return None
+    # Paso 1: Intentar login directo con la contraseña nueva
+    jwt_token = _dtrack_login(DTRACK_NEW_PASSWORD)
+
+    if not jwt_token:
+        # Paso 2: Intentar login con admin/admin (primera vez)
+        jwt_token = _dtrack_login("admin")
+
+        if not jwt_token:
+            # Paso 3: Forzar cambio de contraseña (requerido en primer login)
+            if not _dtrack_force_change_password():
+                print(f"  {C.RED}[✗] No se pudo conectar a Dependency-Track.{C.NC}")
+                print(f"      Verifique que esté corriendo: docker compose ps")
+                return None
+
+            # Paso 4: Intentar login con la nueva contraseña
+            jwt_token = _dtrack_login(DTRACK_NEW_PASSWORD)
+
+            if not jwt_token:
+                print(f"  {C.RED}[✗] No se pudo autenticar en Dependency-Track.{C.NC}")
+                print(f"      Opciones:")
+                print(f"        1. Establezca DTRACK_API_KEY manualmente")
+                print(f"        2. Acceda a http://localhost:8083, haga login y obtenga el API key")
+                print(f"        3. Establezca DTRACK_NEW_PASSWORD con la contraseña actual")
+                return None
+
+    print(f"  {C.GREEN}[✓] Login exitoso en Dependency-Track{C.NC}")
 
     # Obtener API keys del equipo Administrators
     headers = {"Authorization": f"Bearer {jwt_token}"}
-    resp = requests.get(f"{DTRACK_URL}/api/v1/team", headers=headers, timeout=10)
-    if resp.status_code == 200:
-        teams = resp.json()
+    try:
+        resp = requests.get(f"{DTRACK_URL}/api/v1/team", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            teams = resp.json()
+            for team in teams:
+                if team.get("name") == "Administrators":
+                    api_keys = team.get("apiKeys", [])
+                    if api_keys:
+                        DTRACK_API_KEY = api_keys[0].get("key", "")
+                        print(f"  {C.GREEN}[✓] API key obtenido de Dependency-Track{C.NC}")
+                        # Guardar para futuros usos
+                        _save_dtrack_api_key(DTRACK_API_KEY)
+                        return DTRACK_API_KEY
+
+        print(f"  {C.YELLOW}[!] No se encontró API key existente. Creando uno nuevo...{C.NC}")
+
+        # Intentar generar un API key para el equipo Administrators
         for team in teams:
             if team.get("name") == "Administrators":
-                api_keys = team.get("apiKeys", [])
-                if api_keys:
-                    DTRACK_API_KEY = api_keys[0].get("key", "")
-                    print(f"  {C.GREEN}[✓] API key obtenido de Dependency-Track{C.NC}")
+                team_uuid = team.get("uuid")
+                resp2 = requests.put(
+                    f"{DTRACK_URL}/api/v1/team/{team_uuid}/key",
+                    headers=headers,
+                    timeout=10
+                )
+                if resp2.status_code in (200, 201):
+                    DTRACK_API_KEY = resp2.json().get("key", "")
+                    print(f"  {C.GREEN}[✓] API key generado para Dependency-Track{C.NC}")
+                    _save_dtrack_api_key(DTRACK_API_KEY)
                     return DTRACK_API_KEY
+    except Exception as e:
+        print(f"  {C.RED}[✗] Error obteniendo API key: {e}{C.NC}")
 
-    print(f"  {C.YELLOW}[!] No se encontró API key. Créelo manualmente en la UI.{C.NC}")
+    print(f"  {C.YELLOW}[!] No se pudo obtener API key automáticamente.{C.NC}")
+    print(f"      Acceda a http://localhost:8083 > Administration > Teams > Administrators")
+    print(f"      Copie el API key y establézcalo: export DTRACK_API_KEY=<su_key>")
     return None
+
+
+def _save_dtrack_api_key(api_key):
+    """Guarda el API key en un archivo local para futuros usos."""
+    try:
+        key_file = os.path.join(LAB02_DIR, "data", ".dtrack_api_key")
+        with open(key_file, "w") as f:
+            f.write(api_key)
+        os.chmod(key_file, 0o600)
+    except Exception:
+        pass
 
 
 def dtrack_upload_sbom(service_key, sbom_file):
@@ -207,20 +303,26 @@ def _resolve_dojo_password():
 
     # Intentar obtener de los logs del initializer
     try:
-        import subprocess
         result = subprocess.run(
             ["docker", "logs", "vulncorp-dd-initializer"],
             capture_output=True, text=True, timeout=10
         )
         logs = result.stdout + result.stderr
         for line in logs.splitlines():
-            if "password" in line.lower() and "admin" in line.lower():
-                # Extraer la contraseña del log
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    pw = parts[-1].strip()
-                    if pw:
+            line_lower = line.lower()
+            if "password" in line_lower:
+                # Patrones comunes: "Admin password: XXXX" o "admin / XXXX"
+                if ":" in line:
+                    pw = line.split(":")[-1].strip()
+                    if pw and len(pw) > 3:
                         DOJO_PASSWORD = pw
+                        # Guardar para futuros usos
+                        try:
+                            with open(pw_file, "w") as f:
+                                f.write(pw)
+                            os.chmod(pw_file, 0o600)
+                        except Exception:
+                            pass
                         print(f"  {C.CYAN}[i] Contraseña obtenida de los logs del initializer{C.NC}")
                         return DOJO_PASSWORD
     except Exception:
@@ -230,7 +332,11 @@ def _resolve_dojo_password():
     print(f"  {C.YELLOW}[!] No se encontró la contraseña de DefectDojo automáticamente.{C.NC}")
     print(f"      Puede obtenerla ejecutando:")
     print(f"      {C.CYAN}docker logs vulncorp-dd-initializer 2>&1 | grep -i password{C.NC}")
-    DOJO_PASSWORD = input(f"  Ingrese la contraseña de admin de DefectDojo: ").strip()
+    try:
+        DOJO_PASSWORD = input(f"  Ingrese la contraseña de admin de DefectDojo: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
     return DOJO_PASSWORD
 
 
@@ -398,12 +504,11 @@ def dojo_upload_scan(service_key, scan_file):
                 "scan_date": datetime.now().strftime("%Y-%m-%d"),
             },
             files={"file": (os.path.basename(scan_file), f, "application/json")},
-            timeout=60
+            timeout=120
         )
 
     if resp.status_code in (200, 201):
         test_id = resp.json().get("test", "N/A")
-        findings_count = resp.json().get("findings_count", "N/A") if isinstance(resp.json(), dict) else "N/A"
         print(f"  {C.GREEN}[✓] Scan importado en DefectDojo: {meta['name']} (test_id: {test_id}){C.NC}")
         return True
     else:
@@ -416,7 +521,7 @@ def dojo_upload_scan(service_key, scan_file):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    global DTRACK_URL, DOJO_URL
+    global DTRACK_URL, DOJO_URL, DTRACK_API_KEY
 
     parser = argparse.ArgumentParser(description="Upload SBOMs y scans a Dependency-Track y DefectDojo")
     parser.add_argument("--dtrack-only", action="store_true", help="Solo subir a Dependency-Track")
@@ -427,6 +532,15 @@ def main():
 
     DTRACK_URL = args.dtrack_url
     DOJO_URL = args.dojo_url
+
+    # Intentar cargar API key guardado previamente
+    key_file = os.path.join(LAB02_DIR, "data", ".dtrack_api_key")
+    if not DTRACK_API_KEY and os.path.exists(key_file):
+        with open(key_file, "r") as f:
+            saved_key = f.read().strip()
+            if saved_key:
+                DTRACK_API_KEY = saved_key
+                print(f"  {C.CYAN}[i] API key de DTrack cargado desde archivo local{C.NC}")
 
     banner()
 
@@ -452,7 +566,7 @@ def main():
                     success += 1
             print()
             print(f"  {C.BOLD}Resultado: {success}/{len(sbom_files)} SBOMs subidos a Dependency-Track{C.NC}")
-            print(f"  {C.CYAN}Abrir: {DTRACK_URL.replace(':8084',':8083')}{C.NC}")
+            print(f"  {C.CYAN}Abrir: http://localhost:8083{C.NC}")
         print()
 
     # ─── DEFECTDOJO ───
@@ -484,9 +598,9 @@ def main():
     print()
     print(f"  {C.BOLD}Plataformas:{C.NC}")
     if upload_dtrack:
-        print(f"    Dependency-Track: {C.CYAN}http://localhost:8083{C.NC}  (admin/admin)")
+        print(f"    Dependency-Track: {C.CYAN}http://localhost:8083{C.NC}")
     if upload_dojo:
-        print(f"    DefectDojo:       {C.CYAN}http://localhost:8085{C.NC}  (admin/VulnCorp2024!)")
+        print(f"    DefectDojo:       {C.CYAN}http://localhost:8085{C.NC}")
     print()
 
 
