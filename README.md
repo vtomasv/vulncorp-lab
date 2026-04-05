@@ -37,8 +37,8 @@ El laboratorio simula una empresa con tres zonas de red diferenciadas:
 │  │  └──────────┘  └───────────┘  └──────────────┘  │                │
 │  │                      │                           │                │
 │  │                ┌─────┴─────┐                     │                │
-│  │                │  MySQL    │◄────────────────┐   │                │
-│  │                │  5.7.36   │                 │   │                │
+│  │                │ MariaDB   │◄────────────────┐   │                │
+│  │                │ 10.5.18   │                 │   │                │
 │  │                │   (BD)    │                 │   │                │
 │  └────────────────┴───────────┴─────────────────┘   │                │
 │                         │                           │                │
@@ -68,11 +68,24 @@ El laboratorio simula una empresa con tres zonas de red diferenciadas:
 |----------|--------------|-----|------------|----------------|
 | Nginx Proxy | `nginx:1.21.0` | Producción | Internet (8080) | CVE-2021-23017, CVE-2021-3618 y otros |
 | PrestaShop | `prestashop/prestashop:1.7.8.0` | Producción | Via proxy | CVE-2022-31101, CVE-2022-35933 y otros |
-| MySQL | `mysql:5.7.36` | Prod + Corp | Interna | CVE-2022-21417, CVE-2022-21427 y otros |
+| MariaDB | `mariadb:10.5.18` | Prod + Corp | Interna | CVE-2022-32084, CVE-2022-32091 y otros |
 | Redis | `redis:6.2.6` | Producción | Interna | CVE-2022-24735, CVE-2022-24736 y otros |
 | phpMyAdmin | `phpmyadmin:5.1.1` | Corporativa | Interna (8081) | CVE-2022-23807, CVE-2022-0813 y otros |
 | Workstation | `ubuntu:20.04` | Corporativa | Interna | Múltiples CVEs de paquetes del sistema |
-| FTP Server | `fauria/vsftpd` | Corporativa | Interna | Transmisión en texto plano |
+| FTP Server | `delfer/alpine-ftp-server` | Corporativa | Interna | Transmisión en texto plano |
+
+---
+
+## Compatibilidad
+
+Este laboratorio es compatible con las siguientes arquitecturas:
+
+| Arquitectura | Plataforma | Estado |
+|-------------|-----------|--------|
+| AMD64 (x86_64) | Intel / AMD (Windows, Linux, Mac Intel) | Totalmente compatible |
+| ARM64 (aarch64) | Apple Silicon M1/M2/M3/M4, Raspberry Pi | Totalmente compatible |
+
+Todas las imágenes Docker seleccionadas tienen soporte nativo multi-arquitectura. Se utiliza **MariaDB 10.5** en lugar de MySQL 5.7 porque MySQL 5.7 no tiene imagen oficial para ARM64.
 
 ---
 
@@ -178,4 +191,4 @@ Este material es de uso exclusivamente educativo, creado para el curso MAR303 de
 
 - **Profesor:** Tomás Vera — Universidad Mayor — 2026
 - **Frameworks de referencia:** MITRE ATT&CK, CVE, CVSS, EPSS, CISA KEV
-- **Herramientas:** Trivy (Aqua Security), Docker, PrestaShop
+- **Herramientas:** Trivy (Aqua Security), Docker, PrestaShop, MariaDB

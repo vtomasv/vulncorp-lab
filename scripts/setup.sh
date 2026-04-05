@@ -5,6 +5,8 @@
 #
 #  Ejecutar UNA VEZ antes de iniciar el laboratorio.
 #  Instala Trivy y descarga las imágenes Docker necesarias.
+#
+#  Compatible con: AMD64 (Intel/AMD) y ARM64 (Apple Silicon M1/M2/M3/M4)
 ###############################################################################
 
 set -e
@@ -25,6 +27,15 @@ echo ""
 
 # 1. Verificar Docker y Docker Compose
 echo -e "${YELLOW}[1/4] Verificando requisitos del sistema...${NC}"
+
+# Detectar arquitectura
+ARCH=$(uname -m)
+echo -e "  [i] Arquitectura detectada: ${BOLD}${ARCH}${NC}"
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    echo -e "  [i] Sistema ARM64 (Apple Silicon / ARM). Imágenes compatibles seleccionadas."
+elif [ "$ARCH" = "x86_64" ]; then
+    echo -e "  [i] Sistema AMD64 (Intel/AMD). Todas las imágenes son compatibles."
+fi
 
 if ! command -v docker &> /dev/null; then
     echo -e "${RED}[✗] Docker no está instalado. Instálelo desde https://docs.docker.com/get-docker/${NC}"
@@ -50,30 +61,42 @@ echo -e "${YELLOW}[2/4] Instalando Trivy (escáner de vulnerabilidades)...${NC}"
 
 if ! command -v trivy &> /dev/null; then
     echo -e "  Descargando e instalando Trivy..."
-    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    if [ "$OS" = "darwin" ] && command -v brew &> /dev/null; then
+        brew install trivy
+    else
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+    fi
     echo -e "${GREEN}  [✓] Trivy instalado: $(trivy --version 2>/dev/null | head -1)${NC}"
 else
     echo -e "${GREEN}  [✓] Trivy ya instalado: $(trivy --version 2>/dev/null | head -1)${NC}"
 fi
 
-# 3. Descargar imágenes Docker
+# 3. Descargar imágenes Docker (todas compatibles ARM64 + AMD64)
 echo ""
 echo -e "${YELLOW}[3/4] Descargando imágenes Docker (esto puede tomar varios minutos)...${NC}"
 
 IMAGES=(
     "nginx:1.21.0"
     "prestashop/prestashop:1.7.8.0"
-    "mysql:5.7.36"
+    "mariadb:10.5.18"
     "redis:6.2.6"
     "phpmyadmin:5.1.1"
     "ubuntu:20.04"
-    "fauria/vsftpd"
+    "delfer/alpine-ftp-server"
+    "node:18-alpine"
 )
 
 for img in "${IMAGES[@]}"; do
     echo -e "  Descargando ${CYAN}${img}${NC}..."
-    docker pull "$img" --quiet 2>/dev/null || docker pull "$img"
-    echo -e "${GREEN}  [✓] ${img}${NC}"
+    if docker pull "$img" --quiet 2>/dev/null; then
+        echo -e "${GREEN}  [✓] ${img}${NC}"
+    elif docker pull "$img" 2>&1 | tail -1; then
+        echo -e "${GREEN}  [✓] ${img}${NC}"
+    else
+        echo -e "${RED}  [✗] Error descargando ${img}${NC}"
+        echo -e "${YELLOW}      Si está en Apple Silicon, intente: docker pull --platform linux/amd64 ${img}${NC}"
+    fi
 done
 
 # 4. Construir el dashboard

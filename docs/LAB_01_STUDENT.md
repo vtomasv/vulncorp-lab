@@ -32,10 +32,10 @@ La infraestructura de VulnCorp tiene dos redes principales:
 
 | Red | Subred | Propósito | Servicios |
 |-----|--------|-----------|-----------|
-| Producción | 172.20.0.0/24 | E-commerce público | Nginx (proxy), PrestaShop (tienda), MySQL (BD), Redis (caché) |
+| Producción | 172.20.0.0/24 | E-commerce público | Nginx (proxy), PrestaShop (tienda), MariaDB (BD), Redis (caché) |
 | Corporativa | 172.21.0.0/24 | Operaciones internas | phpMyAdmin (admin BD), Workstation (soporte), FTP (archivos) |
 
-**Punto crítico:** La base de datos MySQL está conectada a **ambas redes**, y phpMyAdmin accede con credenciales de root desde la red corporativa.
+**Punto crítico:** La base de datos MariaDB está conectada a **ambas redes**, y phpMyAdmin accede con credenciales de root desde la red corporativa.
 
 ---
 
@@ -180,7 +180,7 @@ Imagine que decide remediar **todas** las vulnerabilidades CRITICAL y HIGH. Cuen
 Ahora considere:
 - Actualizar cada paquete requiere testing, ventana de mantenimiento y posible downtime.
 - El equipo de TI tiene 2 personas y el negocio no puede parar más de 2 horas al mes.
-- Cada actualización de componente mayor (ej: MySQL 5.7 a 8.0) puede romper la aplicación.
+- Cada actualización de componente mayor (ej: MariaDB 10.5 a 11.x) puede romper la aplicación.
 
 **Pregunta clave:** ¿Es viable remediar todo? ¿Qué pasa si intenta hacerlo?
 
@@ -285,7 +285,7 @@ Al finalizar el laboratorio, detenga y elimine los contenedores:
 docker compose down -v
 ```
 
-El flag `-v` eliminará también los volúmenes de datos (base de datos MySQL).
+El flag `-v` eliminará también los volúmenes de datos (base de datos MariaDB).
 
 ---
 

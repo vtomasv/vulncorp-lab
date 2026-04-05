@@ -5,6 +5,8 @@
 #  ADVERTENCIA: Este entorno contiene software INTENCIONALMENTE VULNERABLE.
 #  Úselo SOLO con fines educativos en redes aisladas.
 #  NO exponer a Internet. NO usar en producción.
+#
+#  Compatible con: AMD64 (Intel/AMD) y ARM64 (Apple Silicon M1/M2/M3/M4)
 ###############################################################################
 
 services:
@@ -40,7 +42,7 @@ services:
     container_name: vulncorp-prestashop
     hostname: prestashop
     environment:
-      - DB_SERVER=mysql-prod
+      - DB_SERVER=mariadb-prod
       - DB_PORT=3306
       - DB_NAME=prestashop
       - DB_USER=ps_user
@@ -55,7 +57,7 @@ services:
       - PS_COUNTRY=CL
       - PS_LANGUAGE=es
     depends_on:
-      mysql-prod:
+      mariadb-prod:
         condition: service_healthy
     networks:
       prod_network:
@@ -67,25 +69,29 @@ services:
       vulncorp.criticality: "critica"
     restart: unless-stopped
 
-  # --- Base de Datos MySQL (versión EOL con CVEs conocidos) ---
-  mysql-prod:
-    image: mysql:5.7.36
-    container_name: vulncorp-mysql
-    hostname: mysql-prod
+  # --- Base de Datos MariaDB (reemplazo de MySQL 5.7, compatible ARM64) ---
+  # MariaDB 10.5 es compatible con MySQL 5.7 y tiene CVEs conocidos propios.
+  # Se usa MariaDB porque MySQL 5.7 NO tiene imagen oficial para ARM64
+  # (Apple Silicon M1/M2/M3/M4). MariaDB es un fork directo de MySQL y
+  # PrestaShop lo soporta nativamente.
+  mariadb-prod:
+    image: mariadb:10.5.18
+    container_name: vulncorp-mariadb
+    hostname: mariadb-prod
     environment:
       - MYSQL_ROOT_PASSWORD=R00tVulnCorp!
       - MYSQL_DATABASE=prestashop
       - MYSQL_USER=ps_user
       - MYSQL_PASSWORD=PetaShop2024!
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mariadb_data:/var/lib/mysql
     networks:
       prod_network:
         ipv4_address: 172.20.0.30
       corp_network:
         ipv4_address: 172.21.0.30
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pR00tVulnCorp!"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -124,7 +130,7 @@ services:
     container_name: vulncorp-phpmyadmin
     hostname: phpmyadmin
     environment:
-      - PMA_HOST=mysql-prod
+      - PMA_HOST=mariadb-prod
       - PMA_PORT=3306
       - PMA_USER=root
       - PMA_PASSWORD=R00tVulnCorp!
@@ -132,7 +138,7 @@ services:
     ports:
       - "8081:80"
     depends_on:
-      mysql-prod:
+      mariadb-prod:
         condition: service_healthy
     networks:
       corp_network:
@@ -153,7 +159,7 @@ services:
     command: >
       bash -c "
         apt-get update -qq &&
-        apt-get install -y -qq curl wget net-tools iputils-ping dnsutils mysql-client nano > /dev/null 2>&1 &&
+        apt-get install -y -qq curl wget net-tools iputils-ping dnsutils mariadb-client nano > /dev/null 2>&1 &&
         echo '=== VulnCorp Workstation Ready ===' &&
         tail -f /dev/null
       "
@@ -167,17 +173,14 @@ services:
       vulncorp.criticality: "baja"
     restart: unless-stopped
 
-  # --- Servidor de Archivos (vsftpd vulnerable) ---
+  # --- Servidor de Archivos (vsftpd — protocolo inseguro) ---
+  # Se usa la imagen delfer/alpine-ftp-server que soporta ARM64 y AMD64
   ftp-server:
-    image: fauria/vsftpd
+    image: delfer/alpine-ftp-server
     container_name: vulncorp-ftp
     hostname: ftp-server
     environment:
-      - FTP_USER=vulncorp
-      - FTP_PASS=files2024
-      - PASV_ADDRESS=172.21.0.40
-      - PASV_MIN_PORT=21100
-      - PASV_MAX_PORT=21110
+      - USERS=vulncorp|files2024
     networks:
       corp_network:
         ipv4_address: 172.21.0.40
@@ -247,5 +250,5 @@ networks:
 #  VOLÚMENES
 # =============================================================================
 volumes:
-  mysql_data:
+  mariadb_data:
     driver: local

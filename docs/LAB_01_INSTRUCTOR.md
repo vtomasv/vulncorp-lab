@@ -39,7 +39,7 @@ Tres servicios exponen puertos al host: Nginx en el puerto 8080 (proxy de la tie
 
 **Pregunta 2:** ¿Qué servicio actúa como puente entre las dos redes?
 
-MySQL (vulncorp-mysql) está conectado tanto a `prod_network` (172.20.0.30) como a `corp_network` (172.21.0.30). Esto permite que phpMyAdmin desde la red corporativa acceda directamente a los datos de producción, creando un vector de movimiento lateral.
+MariaDB (vulncorp-mariadb) está conectado tanto a `prod_network` (172.20.0.30) como a `corp_network` (172.21.0.30). Esto permite que phpMyAdmin desde la red corporativa acceda directamente a los datos de producción, creando un vector de movimiento lateral.
 
 **Pregunta 3:** ¿Por qué es peligroso que phpMyAdmin acceda con credenciales root?
 
@@ -63,9 +63,9 @@ A continuación se presenta un ejemplo de cómo debería lucir una priorización
 
 Los tres cambios arquitectónicos más impactantes que los estudiantes deberían identificar son los siguientes.
 
-**Cambio 1: Eliminar phpMyAdmin y reemplazarlo con acceso seguro.** En lugar de exponer phpMyAdmin con credenciales root, se debería usar un túnel SSH o una VPN para que los administradores accedan a MySQL solo cuando sea necesario, con credenciales de solo lectura para consultas y credenciales limitadas para operaciones específicas. Este cambio elimina de golpe todas las vulnerabilidades de phpMyAdmin y reduce drásticamente el riesgo de acceso no autorizado a la base de datos. Costo: bajo. Tiempo: 1 día.
+**Cambio 1: Eliminar phpMyAdmin y reemplazarlo con acceso seguro.** En lugar de exponer phpMyAdmin con credenciales root, se debería usar un túnel SSH o una VPN para que los administradores accedan a MariaDB solo cuando sea necesario, con credenciales de solo lectura para consultas y credenciales limitadas para operaciones específicas. Este cambio elimina de golpe todas las vulnerabilidades de phpMyAdmin y reduce drásticamente el riesgo de acceso no autorizado a la base de datos. Costo: bajo. Tiempo: 1 día.
 
-**Cambio 2: Separar MySQL de la red corporativa.** MySQL no debería estar en ambas redes. Si los empleados necesitan consultar datos, se debería crear una API intermedia o una réplica de solo lectura en la red corporativa. Esto elimina el vector de movimiento lateral. Costo: medio. Tiempo: 1 semana.
+**Cambio 2: Separar MariaDB de la red corporativa.** MariaDB no debería estar en ambas redes. Si los empleados necesitan consultar datos, se debería crear una API intermedia o una réplica de solo lectura en la red corporativa. Esto elimina el vector de movimiento lateral. Costo: medio. Tiempo: 1 semana.
 
 **Cambio 3: Agregar headers de seguridad y WAF al Nginx.** Configurar X-Frame-Options, Content-Security-Policy, HSTS y un WAF básico (como ModSecurity) en el proxy inverso. Esto mitiga múltiples vectores de ataque web sin necesidad de parchear PrestaShop. Costo: bajo. Tiempo: 2 horas.
 
@@ -75,7 +75,7 @@ Los tres cambios arquitectónicos más impactantes que los estudiantes deberían
 
 El error más frecuente es priorizar exclusivamente por score CVSS sin considerar el contexto. Un estudiante que asigne P1 a todas las vulnerabilidades CRITICAL sin importar si el servicio está expuesto a Internet o no, demuestra que no ha comprendido el concepto central de la clase.
 
-Otro error común es proponer "actualizar todo" como solución sin considerar el impacto en la disponibilidad del servicio. Actualizar MySQL de 5.7 a 8.0 puede romper la aplicación PrestaShop y requiere testing extensivo, lo cual no siempre es viable en el corto plazo.
+Otro error común es proponer "actualizar todo" como solución sin considerar el impacto en la disponibilidad del servicio. Actualizar MariaDB de 10.5 a 11.x puede romper la aplicación PrestaShop y requiere testing extensivo, lo cual no siempre es viable en el corto plazo.
 
 ---
 
@@ -83,7 +83,7 @@ Otro error común es proponer "actualizar todo" como solución sin considerar el
 
 Para grupos avanzados o sesiones de 120 minutos, el instructor puede agregar las siguientes actividades.
 
-Se puede pedir a los estudiantes que ejecuten `docker exec -it vulncorp-workstation bash` y desde ahí intenten conectarse a MySQL con `mysql -h mysql-prod -u root -pR00tVulnCorp!` para demostrar en vivo cómo el movimiento lateral es posible gracias a la arquitectura actual.
+Se puede pedir a los estudiantes que ejecuten `docker exec -it vulncorp-workstation bash` y desde ahí intenten conectarse a MariaDB con `mysql -h mariadb-prod -u root -pR00tVulnCorp!` para demostrar en vivo cómo el movimiento lateral es posible gracias a la arquitectura actual.
 
 También se puede introducir el concepto de SBOM (Software Bill of Materials) ejecutando `trivy image --format cyclonedx prestashop/prestashop:1.7.8.0` para generar un inventario completo de componentes de software.
 
