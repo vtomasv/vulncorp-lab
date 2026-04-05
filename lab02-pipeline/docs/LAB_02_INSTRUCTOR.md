@@ -97,6 +97,8 @@ Respuesta esperada: Permite que herramientas de diferentes fabricantes se comuni
 
 1b. **Contraseña de DefectDojo**: A partir de la versión 2.45+, DefectDojo genera una contraseña aleatoria para el admin. El script `setup_lab02.sh` intenta capturarla automáticamente, pero si falla, los estudiantes deben ejecutar: `docker logs vulncorp-dd-initializer 2>&1 | grep -i password`. Es común que los estudiantes no encuentren la contraseña; tenga preparado el comando para mostrarlo en clase.
 
+1c. **Contraseña de Dependency-Track**: En la versión 4.14+, el primer login con `admin/admin` requiere un cambio de contraseña obligatorio. El script `upload_reports.py` maneja esto automáticamente vía API y cambia la contraseña a `VulnCorp2026!`. Si los estudiantes intentan entrar a la UI antes de correr el script, tendrán que cambiarla manualmente y luego el script podría fallar si no usan esa misma contraseña.
+
 2. **Confundir SBOM con reporte de vulnerabilidades**: El SBOM es un inventario (Syft). El reporte de vulnerabilidades es el resultado de escanear ese inventario (Grype). Son documentos diferentes aunque ambos pueden estar en formato CycloneDX.
 
 3. **Priorizar solo por CVSS**: Muchos estudiantes priorizarán por número de vulnerabilidades o por CVSS score sin considerar el contexto (exposición, criticidad del activo, explotabilidad real). Esto es una oportunidad para introducir EPSS, KEV y SSVC.

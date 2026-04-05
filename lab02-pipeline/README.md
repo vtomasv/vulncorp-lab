@@ -83,7 +83,7 @@ python3 scripts/upload_reports.py
 
 | Plataforma | URL | Credenciales |
 |------------|-----|-------------|
-| Dependency-Track | http://localhost:8083 | admin / admin |
+| Dependency-Track | http://localhost:8083 | admin / VulnCorp2026! (o admin/admin en primer login) |
 | DefectDojo | http://localhost:8085 | admin / (ver nota abajo) |
 
 DefectDojo genera una contraseña aleatoria para el admin en la primera ejecución. El script `setup_lab02.sh` intenta capturarla y guardarla en `data/.dd_admin_password`. Si necesita obtenerla manualmente:

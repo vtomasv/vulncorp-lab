@@ -97,7 +97,7 @@ Anote la contraseña, la necesitará para acceder a la plataforma.
 
 | Plataforma | URL | Credenciales |
 |------------|-----|-------------|
-| Dependency-Track | http://localhost:8083 | admin / admin |
+| Dependency-Track | http://localhost:8083 | admin / VulnCorp2026! (o admin/admin en primer login) |
 | DefectDojo | http://localhost:8085 | admin / (contraseña del paso 1.3b) |
 
 **Evidencia 1:** Tome una captura de pantalla del login exitoso en ambas plataformas.
@@ -276,7 +276,9 @@ python3 scripts/upload_reports.py --dtrack-only
 
 ### Paso 4.2: Explorar la interfaz de Dependency-Track
 
-Abra http://localhost:8083 en su navegador e inicie sesión (admin/admin).
+Abra http://localhost:8083 en su navegador e inicie sesión.
+   - Si el script `upload_reports.py` ya se ejecutó, la contraseña es **VulnCorp2026!**
+   - Si es su primer acceso manual, use **admin/admin** y el sistema le pedirá cambiarla.
 
 1. Vaya a **Projects**: Debería ver un proyecto por cada servicio de VulnCorp.
 2. Haga clic en **VulnCorp PetaShop** (PrestaShop).
