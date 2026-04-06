@@ -3,9 +3,8 @@
     VulnCorp Lab - Escaneo de Vulnerabilidades con Trivy (PowerShell)
 .DESCRIPTION
     Script nativo de PowerShell para Windows.
-    Usa cmd /c para redirigir la salida de Trivy, evitando problemas
-    de codificacion (BOM, UTF-16) que PowerShell introduce al redirigir
-    la salida de binarios externos.
+    Usa [System.Diagnostics.Process] para ejecutar Trivy y capturar stdout
+    directamente como bytes, evitando que PowerShell modifique la codificacion.
 
     Curso: Gestion de Vulnerabilidades con Enfoque MITRE - 2026
 .USAGE
@@ -32,57 +31,144 @@ if (-not (Test-Path $DataDir)) {
 
 # --- Funcion para escribir log ---
 function Write-Log($msg) {
-    $msg | Add-Content -Path $LogFile -Encoding ASCII
+    $entry = "[$(Get-Date -Format 'HH:mm:ss')] $msg"
+    [System.IO.File]::AppendAllText($LogFile, "$entry`r`n", (New-Object System.Text.UTF8Encoding $false))
 }
 
 # Iniciar log
-"=== VulnCorp Scan Log ===" | Set-Content -Path $LogFile -Encoding ASCII
-Write-Log "Timestamp: $Timestamp"
-Write-Log "Platform: PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)"
-Write-Log "DataDir: $DataDir"
+$logHeader = "=== VulnCorp Scan Log ===`r`nTimestamp: $Timestamp`r`nPlatform: PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)`r`nDataDir: $DataDir`r`n"
+[System.IO.File]::WriteAllText($LogFile, $logHeader, (New-Object System.Text.UTF8Encoding $false))
 
-# --- Funcion para ejecutar Trivy con cmd /c ---
-# Esto evita que PowerShell modifique la codificacion de la salida.
-# cmd /c pasa la salida binaria directamente al archivo sin BOM ni conversion.
-function Invoke-TrivyToFile {
+# --- Funcion para ejecutar Trivy y guardar stdout a archivo ---
+# Usa System.Diagnostics.Process para capturar stdout como bytes puros
+# sin que PowerShell modifique la codificacion.
+function Invoke-TrivyScan {
     param(
         [string]$Arguments,
         [string]$OutputFile,
-        [string]$ErrorFile
+        [switch]$ShowStderr
     )
 
-    # Construir comando cmd /c con rutas escapadas
-    # Usamos comillas dobles alrededor de las rutas para manejar espacios
-    $cmdLine = "trivy $Arguments > `"$OutputFile`" 2> `"$ErrorFile`""
-    Write-Log "CMD: cmd /c $cmdLine"
+    Write-Log "CMD: trivy $Arguments"
 
-    $process = Start-Process -FilePath "cmd.exe" `
-        -ArgumentList "/c", $cmdLine `
-        -Wait -NoNewWindow -PassThru
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "trivy"
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    # Forzar UTF-8 sin BOM en la salida
+    $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $psi.StandardErrorEncoding = New-Object System.Text.UTF8Encoding $false
 
-    return $process.ExitCode
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+
+        # Leer stdout y stderr de forma asincrona para evitar deadlocks
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+        $proc.WaitForExit()
+
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+
+        # Guardar stdout al archivo usando .NET (sin BOM)
+        if ($OutputFile -and $stdout) {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($OutputFile, $stdout, $utf8NoBom)
+        }
+
+        # Mostrar stderr si se solicita
+        if ($ShowStderr -and $stderr) {
+            Write-Host "  --- Salida de Trivy (stderr) ---" -ForegroundColor DarkGray
+            $stderr -split "`n" | ForEach-Object {
+                $line = $_.TrimEnd("`r")
+                if ($line) { Write-Host "    $line" -ForegroundColor DarkGray }
+            }
+            Write-Host "  --- Fin ---" -ForegroundColor DarkGray
+        }
+
+        # Guardar stderr en log
+        if ($stderr) {
+            Write-Log "STDERR: $($stderr.Substring(0, [Math]::Min(500, $stderr.Length)))"
+        }
+
+        return @{
+            ExitCode = $proc.ExitCode
+            Stdout = $stdout
+            Stderr = $stderr
+        }
+    }
+    catch {
+        Write-Log "ERROR ejecutando Trivy: $_"
+        return @{
+            ExitCode = -1
+            Stdout = ""
+            Stderr = $_.ToString()
+        }
+    }
 }
 
-# --- Funcion para limpiar BOM de un archivo (por si acaso) ---
+# --- Funcion para ejecutar Trivy sin captura (para DB download) ---
+function Invoke-TrivyCommand {
+    param([string]$Arguments)
+
+    Write-Log "CMD: trivy $Arguments"
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "trivy"
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        $stderr = $stderrTask.Result
+        if ($stderr) { Write-Log "STDERR: $($stderr.Substring(0, [Math]::Min(300, $stderr.Length)))" }
+        return $proc.ExitCode
+    }
+    catch {
+        Write-Log "ERROR: $_"
+        return -1
+    }
+}
+
+# --- Funcion para limpiar BOM de un archivo ---
 function Remove-BOM {
     param([string]$FilePath)
 
     if (-not (Test-Path $FilePath)) { return }
 
     $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    if ($bytes.Length -lt 2) { return }
+
+    $changed = $false
+
+    # BOM UTF-8 (EF BB BF)
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        Write-Log "BOM detectado y eliminado en: $FilePath"
+        Write-Log "BOM UTF-8 detectado y eliminado en: $FilePath"
         $clean = New-Object byte[] ($bytes.Length - 3)
         [System.Array]::Copy($bytes, 3, $clean, 0, $clean.Length)
         [System.IO.File]::WriteAllBytes($FilePath, $clean)
+        $changed = $true
     }
-    # BOM UTF-16 LE
-    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+    # BOM UTF-16 LE (FF FE)
+    elseif ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
         Write-Log "BOM UTF-16LE detectado en: $FilePath - Convirtiendo a UTF-8"
         $text = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
-        $utf8 = [System.Text.Encoding]::UTF8.GetBytes($text)
+        $utf8 = (New-Object System.Text.UTF8Encoding $false).GetBytes($text)
         [System.IO.File]::WriteAllBytes($FilePath, $utf8)
+        $changed = $true
     }
+
+    return $changed
 }
 
 # --- Funcion para leer JSON limpio ---
@@ -91,11 +177,12 @@ function Read-CleanJson {
 
     if (-not (Test-Path $FilePath)) { return $null }
 
-    Remove-BOM -FilePath $FilePath
+    Remove-BOM -FilePath $FilePath | Out-Null
 
     try {
-        $raw = [System.IO.File]::ReadAllText($FilePath, [System.Text.Encoding]::UTF8)
+        $raw = [System.IO.File]::ReadAllText($FilePath, (New-Object System.Text.UTF8Encoding $false))
         $raw = $raw.TrimStart([char]0xFEFF).Replace("`0", "").Trim()
+        if (-not $raw) { return $null }
         return $raw | ConvertFrom-Json
     } catch {
         Write-Log "Error parseando JSON $FilePath : $_"
@@ -195,33 +282,23 @@ Write-Host "[2/4] Actualizando base de datos de vulnerabilidades..." -Foreground
 Write-Info "Esto puede tomar unos minutos la primera vez."
 
 # Limpiar scan cache
-& trivy clean --scan-cache 2>&1 | Out-Null
+Invoke-TrivyCommand -Arguments "clean --scan-cache" | Out-Null
 
 $dbOk = $false
 for ($attempt = 1; $attempt -le 3; $attempt++) {
     Write-Log "DB download attempt $attempt/3"
 
-    # Usar cmd /c para evitar problemas de PowerShell con la salida de Trivy
-    $dbErrFile = Join-Path $DataDir "db_download.err"
-    $exitCode = Invoke-TrivyToFile -Arguments "image --download-db-only" -OutputFile "NUL" -ErrorFile $dbErrFile
+    $exitCode = Invoke-TrivyCommand -Arguments "image --download-db-only"
 
     if ($exitCode -eq 0) {
         $dbOk = $true
         Write-Ok "Base de datos actualizada"
-        if (Test-Path $dbErrFile) { Remove-Item $dbErrFile -Force -ErrorAction SilentlyContinue }
         break
     }
 
     Write-Warn "Intento $attempt/3 fallido."
-    if (Test-Path $dbErrFile) {
-        $errContent = Get-Content $dbErrFile -Tail 3 -ErrorAction SilentlyContinue
-        if ($errContent) {
-            $errContent | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
-        }
-    }
-
     Write-Info "Limpiando DB y reintentando..."
-    & trivy clean --vuln-db 2>&1 | Out-Null
+    Invoke-TrivyCommand -Arguments "clean --vuln-db" | Out-Null
     Start-Sleep -Seconds 3
 }
 
@@ -242,6 +319,8 @@ Write-Host "[3/4] Escaneando imagenes del laboratorio VulnCorp..." -ForegroundCo
 $summaryFile = Join-Path $DataDir "scan_summary.jsonl"
 if (Test-Path $summaryFile) { Remove-Item $summaryFile -Force }
 
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
 foreach ($svc in $Services) {
     $name = $svc.Name
     $image = $svc.Image
@@ -249,7 +328,6 @@ foreach ($svc in $Services) {
     $exposure = $svc.Exposure
     $criticality = $svc.Criticality
     $reportFile = Join-Path $DataDir "${name}_trivy.json"
-    $errFile = Join-Path $DataDir "${name}_scan.err"
 
     Write-Host ""
     Write-Host "  ------------------------------------------------------------" -ForegroundColor Blue
@@ -266,32 +344,29 @@ foreach ($svc in $Services) {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         if ($attempt -gt 1) {
             Write-Warn "Reintento $attempt/2 - Limpiando cache..."
-            & trivy clean --scan-cache 2>&1 | Out-Null
+            Invoke-TrivyCommand -Arguments "clean --scan-cache" | Out-Null
             Start-Sleep -Seconds 2
         }
 
         # Eliminar reporte anterior
         if (Test-Path $reportFile) { Remove-Item $reportFile -Force }
-        if (Test-Path $errFile) { Remove-Item $errFile -Force }
 
         # ---- ESCANEO ----
-        # Usamos cmd /c para redirigir la salida de Trivy.
-        # Esto evita que PowerShell agregue BOM o convierta la codificacion.
+        # Usamos System.Diagnostics.Process para capturar stdout como bytes puros
+        # y escribirlo directamente al archivo sin BOM ni conversion de encoding.
+        $showStderr = ($VerbosePreference -eq "Continue")
         $trivyArgs = "image --format json --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --skip-db-update `"$image`""
-        $exitCode = Invoke-TrivyToFile -Arguments $trivyArgs -OutputFile $reportFile -ErrorFile $errFile
+        $result = Invoke-TrivyScan -Arguments $trivyArgs -OutputFile $reportFile -ShowStderr:$showStderr
 
-        Write-Log "Exit code: $exitCode"
+        Write-Log "Exit code: $($result.ExitCode)"
 
-        if ($VerbosePreference -eq "Continue" -and (Test-Path $errFile)) {
-            Write-Host "  --- Salida de Trivy (stderr) ---" -ForegroundColor DarkGray
-            Get-Content $errFile -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-            Write-Host "  --- Fin ---" -ForegroundColor DarkGray
-        }
-
-        if ($exitCode -ne 0) {
-            Write-Fail "Trivy fallo (exit code: $exitCode)"
-            if (Test-Path $errFile) {
-                Get-Content $errFile -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        if ($result.ExitCode -ne 0) {
+            Write-Fail "Trivy fallo (exit code: $($result.ExitCode))"
+            if ($result.Stderr) {
+                $result.Stderr -split "`n" | Select-Object -Last 5 | ForEach-Object {
+                    $line = $_.TrimEnd("`r")
+                    if ($line) { Write-Host "    $line" -ForegroundColor Yellow }
+                }
             }
             continue
         }
@@ -299,6 +374,7 @@ foreach ($svc in $Services) {
         # Verificar que el archivo existe y tiene contenido
         if (-not (Test-Path $reportFile)) {
             Write-Fail "Archivo de reporte no se genero"
+            Write-Log "FAIL: Report file not created"
             continue
         }
 
@@ -308,8 +384,8 @@ foreach ($svc in $Services) {
             continue
         }
 
-        # Limpiar BOM si existe
-        Remove-BOM -FilePath $reportFile
+        # Limpiar BOM si existe (por si acaso)
+        Remove-BOM -FilePath $reportFile | Out-Null
 
         Write-Info "Archivo generado: $fileSize bytes"
         Write-Log "Report size: $fileSize bytes"
@@ -317,16 +393,21 @@ foreach ($svc in $Services) {
         # ---- CONTAR VULNERABILIDADES ----
         # Usamos Python para parsear el JSON de forma robusta
         $pyCountScript = Join-Path $DataDir "_count_vulns.py"
-        @"
+        # Escribir script Python con .NET para evitar BOM
+        $pyCode = @"
 import json, sys
 try:
-    with open(r'$($reportFile.Replace("'","''"))', encoding='utf-8-sig') as f:
+    with open(sys.argv[1], 'rb') as f:
         raw = f.read()
-    raw = raw.lstrip('\ufeff').replace('\x00', '').strip()
-    if not raw:
+    if raw[:3] == b'\xef\xbb\xbf':
+        raw = raw[3:]
+    if raw[:2] == b'\xff\xfe':
+        raw = raw.decode('utf-16-le').encode('utf-8')
+    text = raw.decode('utf-8', errors='ignore').strip()
+    if not text:
         print('0 0 0 0 0')
         sys.exit(0)
-    data = json.loads(raw)
+    data = json.loads(text)
     c = h = m = l = 0
     for r in data.get('Results', []):
         for v in (r.get('Vulnerabilities') or []):
@@ -339,9 +420,10 @@ try:
 except Exception as e:
     print('0 0 0 0 0')
     print(f'ERROR: {e}', file=sys.stderr)
-"@ | Set-Content -Path $pyCountScript -Encoding ASCII
+"@
+        [System.IO.File]::WriteAllText($pyCountScript, $pyCode, $utf8NoBom)
 
-        $counts = & $PythonExe $pyCountScript 2>>$LogFile
+        $counts = & $PythonExe $pyCountScript $reportFile 2>>$LogFile
         $parts = ($counts | Out-String).Trim().Split(' ')
 
         if ($parts.Count -ge 5) {
@@ -376,15 +458,14 @@ except Exception as e:
         }
 
         # Limpiar archivos temporales
-        if (Test-Path $errFile) { Remove-Item $errFile -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $pyCountScript) { Remove-Item $pyCountScript -Force -ErrorAction SilentlyContinue }
+        Remove-Item -Path $pyCountScript -Force -ErrorAction SilentlyContinue
         $scanOk = $true
         break
     }
 
     if (-not $scanOk) {
         Write-Fail "No se pudo escanear $name despues de 2 intentos."
-        '{"Results":[]}' | Set-Content -Path $reportFile -Encoding ASCII
+        [System.IO.File]::WriteAllText($reportFile, '{"Results":[]}', $utf8NoBom)
         $crit = 0; $high = 0; $med = 0; $low = 0; $total = 0
     }
 
@@ -399,10 +480,9 @@ except Exception as e:
     Write-Host "  |  LOW: $low  |  TOTAL: $total"
     Write-Ok "Reporte: $reportFile"
 
-    # Guardar en JSONL (usando ASCII para evitar BOM)
+    # Guardar en JSONL usando .NET para evitar BOM
     $jsonLine = "{`"service`":`"$name`",`"image`":`"$image`",`"zone`":`"$zone`",`"exposure`":`"$exposure`",`"criticality`":`"$criticality`",`"critical`":$crit,`"high`":$high,`"medium`":$med,`"low`":$low,`"total`":$total,`"timestamp`":`"$Timestamp`"}"
-    # Usar .NET para escribir sin BOM
-    [System.IO.File]::AppendAllText($summaryFile, "$jsonLine`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::AppendAllText($summaryFile, "$jsonLine`n", $utf8NoBom)
 }
 
 # =====================================================================
@@ -413,10 +493,10 @@ Write-Host ""
 Write-Host "[4/4] Generando reporte consolidado..." -ForegroundColor Yellow
 
 $pyConsolidateScript = Join-Path $DataDir "_consolidate.py"
-@"
+$pyConsolidateCode = @"
 import json, os, sys
 
-data_dir = r'$DataDir'
+data_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
 summary_file = os.path.join(data_dir, 'scan_summary.jsonl')
 
 if not os.path.exists(summary_file):
@@ -424,12 +504,17 @@ if not os.path.exists(summary_file):
     sys.exit(0)
 
 services = []
-with open(summary_file, 'r', encoding='utf-8-sig') as f:
-    for line in f:
-        line = line.strip().lstrip('\ufeff').replace('\x00', '')
-        if not line: continue
-        try: services.append(json.loads(line))
-        except: continue
+with open(summary_file, 'rb') as f:
+    raw = f.read()
+if raw[:3] == b'\xef\xbb\xbf':
+    raw = raw[3:]
+text = raw.decode('utf-8', errors='ignore')
+
+for line in text.splitlines():
+    line = line.strip()
+    if not line: continue
+    try: services.append(json.loads(line))
+    except: continue
 
 if not services:
     print("  No se encontraron resultados validos.")
@@ -464,9 +549,10 @@ with open(out, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(consolidated, f, indent=2, ensure_ascii=False)
 
 print(f"  Reporte consolidado: {out}")
-"@ | Set-Content -Path $pyConsolidateScript -Encoding ASCII
+"@
+[System.IO.File]::WriteAllText($pyConsolidateScript, $pyConsolidateCode, $utf8NoBom)
 
-& $PythonExe $pyConsolidateScript
+& $PythonExe $pyConsolidateScript $DataDir
 
 # Limpiar scripts temporales
 Remove-Item -Path (Join-Path $DataDir "_count_vulns.py") -Force -ErrorAction SilentlyContinue

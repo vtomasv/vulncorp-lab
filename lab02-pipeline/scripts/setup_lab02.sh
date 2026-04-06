@@ -1,154 +1,210 @@
-#!/bin/bash
+#!/usr/bin/env bash
 ###############################################################################
-#  VulnCorp Lab 02 — Setup del Pipeline de Gestión de Vulnerabilidades
-#  Curso MAR303 — Universidad Mayor — 2026
+#  VulnCorp Lab 02 -- Setup del Pipeline de Gestion de Vulnerabilidades
+#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE -- 2026
 #
 #  Este script instala las herramientas CLI necesarias:
-#    1. Syft  — Generador de SBOM (Software Bill of Materials)
-#    2. Grype — Escáner de vulnerabilidades basado en SBOM
+#    1. Syft  -- Generador de SBOM (Software Bill of Materials)
+#    2. Grype -- Escaner de vulnerabilidades basado en SBOM
 #
-#  Y levanta las plataformas de gestión:
-#    3. Dependency-Track — Análisis continuo de SBOM
-#    4. DefectDojo        — Gestión centralizada de vulnerabilidades
+#  Y levanta las plataformas de gestion:
+#    3. Dependency-Track -- Analisis continuo de SBOM
+#    4. DefectDojo        -- Gestion centralizada de vulnerabilidades
 #
 #  Compatible con:
 #    - macOS ARM64 (Apple Silicon M1/M2/M3/M4)
 #    - macOS AMD64 (Intel)
 #    - Linux AMD64 / ARM64
-#    - Windows (via WSL2 + Docker Desktop)
+#    - Windows (Git Bash MINGW64 / WSL2 + Docker Desktop)
 ###############################################################################
 
 set -e
 
-# Colores
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# --- Detectar plataforma ---
+PLATFORM="linux"
+IS_WINDOWS=false
+IS_MACOS=false
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        PLATFORM="windows"
+        IS_WINDOWS=true
+        ;;
+    Darwin*)
+        PLATFORM="macos"
+        IS_MACOS=true
+        ;;
+    Linux*)
+        if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+            PLATFORM="wsl2"
+        fi
+        ;;
+esac
+
+# --- Colores (compatibles con Git Bash) ---
+R=''; G=''; Y=''; C=''; BOLD=''; N=''
+if [ -t 1 ]; then
+    if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    elif [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    fi
+fi
+
+log()  { printf "%b\n" "$*"; }
+ok()   { log "  ${G}[OK]${N} $*"; }
+warn() { log "  ${Y}[!]${N} $*"; }
+fail() { log "  ${R}[X]${N} $*"; }
+info() { log "  ${C}[i]${N} $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LAB02_DIR="$(dirname "$SCRIPT_DIR")"
+LAB02_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo ""
-echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${CYAN}║  VulnCorp Lab 02 — Pipeline de Gestión de Vulnerabilidades  ║${NC}"
-echo -e "${BOLD}${CYAN}║  Setup Inicial                                              ║${NC}"
-echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
+log ""
+log "${BOLD}${C}+==============================================================+${N}"
+log "${BOLD}${C}|  VulnCorp Lab 02 -- Pipeline de Gestion de Vulnerabilidades  |${N}"
+log "${BOLD}${C}|  Setup Inicial                                               |${N}"
+log "${BOLD}${C}+==============================================================+${N}"
+log ""
 
 # Detectar arquitectura y SO
 ARCH=$(uname -m)
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-echo -e "  [i] Arquitectura: ${BOLD}${ARCH}${NC} | SO: ${BOLD}${OS}${NC}"
-
-# Detectar si estamos en WSL
-if grep -qi microsoft /proc/version 2>/dev/null; then
-    echo -e "  [i] Entorno: ${BOLD}WSL2 (Windows)${NC}"
-fi
-echo ""
+info "Arquitectura: ${BOLD}${ARCH}${N} | Plataforma: ${BOLD}${PLATFORM}${N}"
+log ""
 
 # ===================== 1. INSTALAR SYFT =====================
-echo -e "${YELLOW}[1/4] Instalando Syft (generador de SBOM)...${NC}"
+log "${Y}[1/4] Instalando Syft (generador de SBOM)...${N}"
 
-if command -v syft &> /dev/null; then
+if command -v syft >/dev/null 2>&1; then
     SYFT_VER=$(syft version 2>/dev/null | head -3)
-    echo -e "${GREEN}  [✓] Syft ya instalado${NC}"
-    echo -e "      ${SYFT_VER}"
+    ok "Syft ya instalado"
+    log "      ${SYFT_VER}"
 else
-    echo -e "  Descargando Syft..."
-    if [ "$OS" = "darwin" ] && command -v brew &> /dev/null; then
+    info "Descargando Syft..."
+    if [ "$IS_MACOS" = true ] && command -v brew >/dev/null 2>&1; then
         brew install syft
+    elif [ "$IS_WINDOWS" = true ]; then
+        fail "Syft no encontrado. En Windows, instale con:"
+        log "    choco install syft"
+        log "    scoop install syft"
+        log "  Luego vuelva a ejecutar este script."
+        exit 1
     else
         curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
     fi
 
-    if command -v syft &> /dev/null; then
-        echo -e "${GREEN}  [✓] Syft instalado correctamente${NC}"
+    if command -v syft >/dev/null 2>&1; then
+        ok "Syft instalado correctamente"
     else
-        echo -e "${RED}  [✗] Error instalando Syft${NC}"
-        echo -e "${YELLOW}      Instale manualmente: https://github.com/anchore/syft#installation${NC}"
+        fail "Error instalando Syft"
+        info "Instale manualmente: https://github.com/anchore/syft#installation"
     fi
 fi
 
 # ===================== 2. INSTALAR GRYPE =====================
-echo ""
-echo -e "${YELLOW}[2/4] Instalando Grype (escáner de vulnerabilidades)...${NC}"
+log ""
+log "${Y}[2/4] Instalando Grype (escaner de vulnerabilidades)...${N}"
 
-if command -v grype &> /dev/null; then
+if command -v grype >/dev/null 2>&1; then
     GRYPE_VER=$(grype version 2>/dev/null | head -3)
-    echo -e "${GREEN}  [✓] Grype ya instalado${NC}"
-    echo -e "      ${GRYPE_VER}"
+    ok "Grype ya instalado"
+    log "      ${GRYPE_VER}"
 else
-    echo -e "  Descargando Grype..."
-    if [ "$OS" = "darwin" ] && command -v brew &> /dev/null; then
+    info "Descargando Grype..."
+    if [ "$IS_MACOS" = true ] && command -v brew >/dev/null 2>&1; then
         brew install grype
+    elif [ "$IS_WINDOWS" = true ]; then
+        fail "Grype no encontrado. En Windows, instale con:"
+        log "    choco install grype"
+        log "    scoop install grype"
+        log "  Luego vuelva a ejecutar este script."
+        exit 1
     else
         curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
     fi
 
-    if command -v grype &> /dev/null; then
-        echo -e "${GREEN}  [✓] Grype instalado correctamente${NC}"
+    if command -v grype >/dev/null 2>&1; then
+        ok "Grype instalado correctamente"
     else
-        echo -e "${RED}  [✗] Error instalando Grype${NC}"
-        echo -e "${YELLOW}      Instale manualmente: https://github.com/anchore/grype#installation${NC}"
+        fail "Error instalando Grype"
+        info "Instale manualmente: https://github.com/anchore/grype#installation"
     fi
 fi
 
 # ===================== 3. VERIFICAR PYTHON =====================
-echo ""
-echo -e "${YELLOW}[3/4] Verificando Python y dependencias...${NC}"
+log ""
+log "${Y}[3/4] Verificando Python y dependencias...${N}"
 
-if command -v python3 &> /dev/null; then
-    PY_VER=$(python3 --version 2>/dev/null)
-    echo -e "${GREEN}  [✓] Python: ${PY_VER}${NC}"
+# Detectar Python (compatible Git Bash: python3 no existe en Windows)
+PYTHON_CMD=""
+for cmd in python3 python py; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        ver=$("$cmd" --version 2>&1 || true)
+        if echo "$ver" | grep -q "Python 3"; then
+            PYTHON_CMD="$cmd"
+            break
+        fi
+    fi
+done
+
+if [ -n "$PYTHON_CMD" ]; then
+    PY_VER=$("$PYTHON_CMD" --version 2>/dev/null)
+    ok "Python: ${PY_VER}"
 else
-    echo -e "${RED}  [✗] Python 3 no encontrado. Es necesario para los scripts de integración.${NC}"
-    echo -e "${YELLOW}      Instale Python 3.8+ desde https://www.python.org/downloads/${NC}"
+    fail "Python 3 no encontrado. Es necesario para los scripts de integracion."
+    info "Instale Python 3.8+ desde https://www.python.org/downloads/"
 fi
 
-# Instalar requests si no está disponible
-python3 -c "import requests" 2>/dev/null || {
-    echo -e "  Instalando módulo 'requests' para Python..."
-    pip3 install requests --quiet 2>/dev/null || pip install requests --quiet 2>/dev/null || {
-        echo -e "${YELLOW}  [!] No se pudo instalar 'requests'. Instale manualmente: pip3 install requests${NC}"
+# Instalar requests si no esta disponible
+if [ -n "$PYTHON_CMD" ]; then
+    "$PYTHON_CMD" -c "import requests" 2>/dev/null || {
+        info "Instalando modulo 'requests' para Python..."
+        if [ "$IS_WINDOWS" = true ]; then
+            "$PYTHON_CMD" -m pip install requests --quiet 2>/dev/null || {
+                warn "No se pudo instalar 'requests'. Instale manualmente: pip install requests"
+            }
+        else
+            pip3 install requests --quiet 2>/dev/null || pip install requests --quiet 2>/dev/null || {
+                warn "No se pudo instalar 'requests'. Instale manualmente: pip3 install requests"
+            }
+        fi
     }
-}
-echo -e "${GREEN}  [✓] Dependencias Python listas${NC}"
+    ok "Dependencias Python listas"
+fi
 
 # ===================== 4. LEVANTAR PLATAFORMAS =====================
-echo ""
-echo -e "${YELLOW}[4/4] Levantando plataformas de gestión (Dependency-Track + DefectDojo)...${NC}"
-echo -e "${YELLOW}      Esto puede tomar 3-5 minutos en la primera ejecución...${NC}"
-echo ""
+log ""
+log "${Y}[4/4] Levantando plataformas de gestion (Dependency-Track + DefectDojo)...${N}"
+info "Esto puede tomar 3-5 minutos en la primera ejecucion..."
+log ""
 
 cd "$LAB02_DIR"
 docker compose up -d 2>&1
 
-# ===================== ESPERAR Y CAPTURAR CONTRASEÑA DE DEFECTDOJO =====================
-echo ""
-echo -e "${YELLOW}  Esperando a que DefectDojo complete la inicialización...${NC}"
-echo -e "${YELLOW}  (La contraseña del admin se genera automáticamente)${NC}"
-echo ""
+# ===================== ESPERAR Y CAPTURAR CONTRASENA DE DEFECTDOJO =====================
+log ""
+info "Esperando a que DefectDojo complete la inicializacion..."
+info "(La contrasena del admin se genera automaticamente)"
+log ""
 
 DD_PASSWORD=""
-MAX_WAIT=180  # 3 minutos máximo
+MAX_WAIT=180
 ELAPSED=0
 
 while [ $ELAPSED -lt $MAX_WAIT ]; do
-    # Verificar si el initializer terminó
+    # Verificar si el initializer termino
     INIT_STATUS=$(docker inspect --format='{{.State.Status}}' vulncorp-dd-initializer 2>/dev/null || echo "not_found")
 
     if [ "$INIT_STATUS" = "exited" ]; then
-        # Buscar la contraseña en los logs del initializer
-        DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -oP '(?<=Admin password: ).*' || \
-                      docker logs vulncorp-dd-initializer 2>&1 | grep -i "password" | grep -oP ':\s*\K\S+$' || \
-                      echo "")
+        # Buscar la contrasena en los logs del initializer
+        # Usar grep sin -P (PCRE no disponible en Git Bash)
+        DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -i "Admin password:" | sed 's/.*Admin password: *//' | tr -d '\r\n' || true)
 
         if [ -z "$DD_PASSWORD" ]; then
-            # Intentar otro patrón de captura
-            DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -i "admin" | grep -i "pass" | tail -1 | sed 's/.*: //')
+            # Intentar otro patron
+            DD_PASSWORD=$(docker logs vulncorp-dd-initializer 2>&1 | grep -i "password" | tail -1 | sed 's/.*: *//' | tr -d '\r\n' || true)
         fi
         break
     fi
@@ -158,41 +214,50 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     printf "  Esperando... (%ds/%ds)\r" "$ELAPSED" "$MAX_WAIT"
 done
 
-echo ""
+log ""
 
-# Guardar la contraseña en un archivo local
+# Guardar la contrasena en un archivo local
 if [ -n "$DD_PASSWORD" ]; then
     echo "$DD_PASSWORD" > "$LAB02_DIR/data/.dd_admin_password"
-    chmod 600 "$LAB02_DIR/data/.dd_admin_password"
+    # chmod 600 no tiene efecto en Git Bash/Windows, pero no causa error
+    chmod 600 "$LAB02_DIR/data/.dd_admin_password" 2>/dev/null || true
 fi
 
-echo ""
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  [✓] Setup del Lab 02 completado                            ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  ${BOLD}Herramientas CLI instaladas:${NC}"
-echo -e "    Syft:  $(command -v syft 2>/dev/null || echo 'no instalado')"
-echo -e "    Grype: $(command -v grype 2>/dev/null || echo 'no instalado')"
-echo ""
-echo -e "  ${BOLD}Plataformas de gestión:${NC}"
-echo -e "    Dependency-Track: ${CYAN}http://localhost:8083${NC}"
-echo -e "      Credenciales:   admin / admin"
-echo -e "      (Cambiar en el primer login)"
-echo -e ""
-echo -e "    DefectDojo:       ${CYAN}http://localhost:8085${NC}"
+log ""
+log "${G}${BOLD}+==============================================================+${N}"
+log "${G}${BOLD}|  [OK] Setup del Lab 02 completado                            |${N}"
+log "${G}${BOLD}+==============================================================+${N}"
+log ""
+log "  ${BOLD}Herramientas CLI instaladas:${N}"
+log "    Syft:  $(command -v syft 2>/dev/null || echo 'no instalado')"
+log "    Grype: $(command -v grype 2>/dev/null || echo 'no instalado')"
+log ""
+log "  ${BOLD}Plataformas de gestion:${N}"
+log "    Dependency-Track: ${C}http://localhost:8083${N}"
+log "      Credenciales:   admin / admin"
+log "      (Cambiar en el primer login)"
+log ""
+log "    DefectDojo:       ${C}http://localhost:8085${N}"
 if [ -n "$DD_PASSWORD" ]; then
-    echo -e "      Credenciales:   admin / ${BOLD}${DD_PASSWORD}${NC}"
-    echo -e "      ${YELLOW}(Contraseña guardada en data/.dd_admin_password)${NC}"
+    log "      Credenciales:   admin / ${BOLD}${DD_PASSWORD}${N}"
+    log "      ${Y}(Contrasena guardada en data/.dd_admin_password)${N}"
 else
-    echo -e "      ${YELLOW}Credenciales: La contraseña se genera automáticamente.${NC}"
-    echo -e "      ${YELLOW}Para obtenerla ejecute:${NC}"
-    echo -e "      ${CYAN}docker logs vulncorp-dd-initializer 2>&1 | grep -i password${NC}"
+    log "      ${Y}Credenciales: La contrasena se genera automaticamente.${N}"
+    log "      ${Y}Para obtenerla ejecute:${N}"
+    log "      ${C}docker logs vulncorp-dd-initializer 2>&1 | grep -i password${N}"
 fi
-echo ""
-echo -e "  ${BOLD}Próximos pasos:${NC}"
-echo -e "    ${CYAN}1.${NC} Verifique que las plataformas estén listas: ${BOLD}docker compose ps${NC}"
-echo -e "    ${CYAN}2.${NC} Genere los SBOMs:       ${BOLD}./scripts/generate_sbom.sh${NC}"
-echo -e "    ${CYAN}3.${NC} Escanee con Grype:      ${BOLD}./scripts/scan_grype.sh${NC}"
-echo -e "    ${CYAN}4.${NC} Suba a las plataformas: ${BOLD}python3 scripts/upload_reports.py${NC}"
-echo ""
+log ""
+log "  ${BOLD}Proximos pasos:${N}"
+log "    ${C}1.${N} Verifique que las plataformas esten listas: ${BOLD}docker compose ps${N}"
+
+if [ "$IS_WINDOWS" = true ]; then
+    log "    ${C}2.${N} Genere los SBOMs:       ${BOLD}.\\scripts\\generate_sbom.ps1${N}  (PowerShell)"
+    log "       o bien:               ${BOLD}bash scripts/generate_sbom.sh${N}  (Git Bash)"
+    log "    ${C}3.${N} Escanee con Grype:      ${BOLD}.\\scripts\\scan_grype.ps1${N}  (PowerShell)"
+    log "    ${C}4.${N} Suba a las plataformas: ${BOLD}python scripts/upload_reports.py${N}"
+else
+    log "    ${C}2.${N} Genere los SBOMs:       ${BOLD}./scripts/generate_sbom.sh${N}"
+    log "    ${C}3.${N} Escanee con Grype:      ${BOLD}./scripts/scan_grype.sh${N}"
+    log "    ${C}4.${N} Suba a las plataformas: ${BOLD}python3 scripts/upload_reports.py${N}"
+fi
+log ""

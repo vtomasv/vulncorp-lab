@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  VulnCorp Lab 02 — Escaneo de Vulnerabilidades con Grype
-#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE — 2026
+#  VulnCorp Lab 02 -- Escaneo de Vulnerabilidades con Grype
+#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE -- 2026
 #
-#  Compatible con: Linux, macOS, Windows (Git Bash / WSL2)
+#  Compatible con: Linux, macOS, Windows (Git Bash MINGW64 / WSL2)
 #
 #  Toma los SBOMs generados por Syft (CycloneDX JSON) y los pasa por Grype
 #  para detectar vulnerabilidades conocidas.
@@ -11,18 +11,22 @@
 #  Usa redireccion de stdout (>) para evitar problemas de rutas en Windows.
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Detectar plataforma ---
 IS_WINDOWS=false
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;; esac
 
-# --- Colores condicionales ---
-if [ -t 1 ] && command -v tput &>/dev/null && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
-    R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-    C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
-else
-    R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
+# --- Colores (compatibles con Git Bash) ---
+R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
+if [ -t 1 ]; then
+    if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    elif [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    fi
 fi
 
 log()  { printf "%b\n" "$*"; }
@@ -38,10 +42,10 @@ SBOM_DIR="${LAB02_DIR}/data/sbom"
 GRYPE_DIR="${LAB02_DIR}/data/grype"
 mkdir -p "$GRYPE_DIR"
 
-# --- Detectar Python ---
+# --- Detectar Python (compatible Git Bash) ---
 PYTHON_CMD=""
 for cmd in python3 python py; do
-    if command -v "$cmd" &>/dev/null; then
+    if command -v "$cmd" >/dev/null 2>&1; then
         ver=$("$cmd" --version 2>&1 || true)
         if echo "$ver" | grep -q "Python 3"; then
             PYTHON_CMD="$cmd"
@@ -54,6 +58,22 @@ if [ -z "$PYTHON_CMD" ]; then
     exit 1
 fi
 
+# --- Funcion para limpiar BOM (usando Python, compatible Git Bash) ---
+clean_bom() {
+    local filepath="$1"
+    if [ ! -f "$filepath" ]; then return; fi
+    "$PYTHON_CMD" -c "
+import sys
+fp = sys.argv[1]
+with open(fp, 'rb') as f:
+    raw = f.read()
+if raw[:3] == b'\xef\xbb\xbf':
+    with open(fp, 'wb') as f: f.write(raw[3:])
+elif raw[:2] == b'\xff\xfe':
+    with open(fp, 'wb') as f: f.write(raw.decode('utf-16-le').encode('utf-8'))
+" "$filepath" 2>/dev/null || true
+}
+
 log ""
 log "${BOLD}${C}+============================================================+${N}"
 log "${BOLD}${C}|  VulnCorp Lab 02 -- Escaneo de Vulnerabilidades con Grype  |${N}"
@@ -62,8 +82,13 @@ log "${BOLD}${C}+============================================================+${
 log ""
 
 # Verificar Grype
-if ! command -v grype &>/dev/null; then
-    fail "Grype no encontrado. Ejecute primero: ./scripts/setup_lab02.sh"
+if ! command -v grype >/dev/null 2>&1; then
+    fail "Grype no encontrado."
+    if [ "$IS_WINDOWS" = true ]; then
+        info "Instale con: choco install grype  o  scoop install grype"
+    else
+        info "Ejecute primero: ./scripts/setup_lab02.sh"
+    fi
     exit 1
 fi
 grype_ver=$(grype version 2>/dev/null | grep '^Application' || grype version 2>/dev/null | head -1)
@@ -107,51 +132,43 @@ for SBOM_FILE in "${SBOM_FILES[@]}"; do
     info "Generando reporte CycloneDX..."
 
     if grype "sbom:${SBOM_FILE}" -o cyclonedx-json > "$CYCLONEDX_OUT" 2>/dev/null; then
+        clean_bom "$CYCLONEDX_OUT"
         ok "CycloneDX: ${CYCLONEDX_OUT}"
     else
         warn "Error generando CycloneDX para ${BASENAME}"
     fi
 
-    # Limpiar BOM
-    if command -v xxd &>/dev/null && [ -f "$CYCLONEDX_OUT" ]; then
-        first_bytes=$(xxd -l 3 -p "$CYCLONEDX_OUT" 2>/dev/null || true)
-        if [ "$first_bytes" = "efbbbf" ]; then
-            tail -c +4 "$CYCLONEDX_OUT" > "${CYCLONEDX_OUT}.tmp" && mv "${CYCLONEDX_OUT}.tmp" "$CYCLONEDX_OUT"
-        fi
-    fi
-
     # --- JSON detallado ---
     JSON_OUT="${GRYPE_DIR}/${BASENAME}_grype_detail.json"
     grype "sbom:${SBOM_FILE}" -o json > "$JSON_OUT" 2>/dev/null || true
+    clean_bom "$JSON_OUT"
 
-    # Limpiar BOM
-    if command -v xxd &>/dev/null && [ -f "$JSON_OUT" ]; then
-        first_bytes=$(xxd -l 3 -p "$JSON_OUT" 2>/dev/null || true)
-        if [ "$first_bytes" = "efbbbf" ]; then
-            tail -c +4 "$JSON_OUT" > "${JSON_OUT}.tmp" && mv "${JSON_OUT}.tmp" "$JSON_OUT"
-        fi
-    fi
-
-    # --- Contar vulnerabilidades ---
+    # --- Contar vulnerabilidades (script Python temporal) ---
     CRIT=0; HIGH=0; MED=0; LOW=0; NEG=0; TOT=0
     if [ -f "$JSON_OUT" ] && [ -s "$JSON_OUT" ]; then
-        COUNTS=$("$PYTHON_CMD" -c "
+        PY_COUNT="${GRYPE_DIR}/_count_tmp.py"
+        cat > "$PY_COUNT" << 'PYSCRIPT'
 import json, sys
+fpath = sys.argv[1]
 try:
-    with open('''${JSON_OUT}''', encoding='utf-8-sig') as f:
-        raw = f.read().lstrip('\ufeff').replace('\x00','')
-    data = json.loads(raw)
+    with open(fpath, 'rb') as f:
+        raw = f.read()
+    if raw[:3] == b'\xef\xbb\xbf': raw = raw[3:]
+    data = json.loads(raw.decode('utf-8', errors='ignore'))
     matches = data.get('matches', [])
     counts = {'Critical':0, 'High':0, 'Medium':0, 'Low':0, 'Negligible':0}
     for m in matches:
         sev = m.get('vulnerability',{}).get('severity','Unknown')
         if sev in counts: counts[sev] += 1
     total = sum(counts.values())
-    print(f\"{counts['Critical']} {counts['High']} {counts['Medium']} {counts['Low']} {counts['Negligible']} {total}\")
+    print(f"{counts['Critical']} {counts['High']} {counts['Medium']} {counts['Low']} {counts['Negligible']} {total}")
 except Exception as e:
-    print('0 0 0 0 0 0', file=sys.stdout)
+    print('0 0 0 0 0 0')
     print(f'ERROR: {e}', file=sys.stderr)
-" 2>/dev/null || echo "0 0 0 0 0 0")
+PYSCRIPT
+
+        COUNTS=$("$PYTHON_CMD" "$PY_COUNT" "$JSON_OUT" 2>/dev/null || echo "0 0 0 0 0 0")
+        rm -f "$PY_COUNT" 2>/dev/null || true
 
         read -r CRIT HIGH MED LOW NEG TOT <<< "$COUNTS"
         CRIT=${CRIT:-0}; HIGH=${HIGH:-0}; MED=${MED:-0}; LOW=${LOW:-0}; NEG=${NEG:-0}; TOT=${TOT:-0}
@@ -164,7 +181,7 @@ except Exception as e:
     grype "sbom:${SBOM_FILE}" -o table > "$TABLE_OUT" 2>/dev/null || true
     ok "Tabla: ${TABLE_OUT}"
 
-    # Guardar linea de resumen (sin BOM, con newline Unix)
+    # Guardar linea de resumen
     printf '{"service":"%s","critical":%d,"high":%d,"medium":%d,"low":%d,"negligible":%d,"total":%d}\n' \
         "$BASENAME" "$CRIT" "$HIGH" "$MED" "$LOW" "$NEG" "$TOT" \
         >> "${GRYPE_DIR}/grype_summary.jsonl"
@@ -180,25 +197,28 @@ log "${BOLD}${C}|           RESUMEN DE VULNERABILIDADES (GRYPE)              |${
 log "${BOLD}${C}+============================================================+${N}"
 log ""
 
-export GRYPE_DIR
+PY_GRYPE_SUMMARY="${GRYPE_DIR}/_grype_summary_tmp.py"
+cat > "$PY_GRYPE_SUMMARY" << 'PYSCRIPT'
+import json, os, sys
 
-"$PYTHON_CMD" << 'PYEOF'
-import json, os
-
-grype_dir = os.environ.get('GRYPE_DIR', './data/grype')
+grype_dir = sys.argv[1] if len(sys.argv) > 1 else './data/grype'
 summary_file = os.path.join(grype_dir, 'grype_summary.jsonl')
 
 if not os.path.exists(summary_file):
     print("  No se encontraron resultados.")
-    exit(0)
+    sys.exit(0)
 
 services = []
-with open(summary_file, encoding='utf-8-sig') as f:
-    for line in f:
-        line = line.strip().lstrip('\ufeff').replace('\x00', '')
-        if not line: continue
-        try: services.append(json.loads(line))
-        except: continue
+with open(summary_file, 'rb') as f:
+    raw = f.read()
+if raw[:3] == b'\xef\xbb\xbf': raw = raw[3:]
+text = raw.decode('utf-8', errors='ignore')
+
+for line in text.splitlines():
+    line = line.strip()
+    if not line: continue
+    try: services.append(json.loads(line))
+    except: continue
 
 print(f"  {'Servicio':<18} {'CRIT':>6} {'HIGH':>6} {'MED':>6} {'LOW':>6} {'NEG':>6} {'TOTAL':>7}")
 print(f"  {'-'*18} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*7}")
@@ -223,12 +243,19 @@ out = os.path.join(grype_dir, 'grype_consolidated.json')
 with open(out, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(consolidated, f, indent=2, ensure_ascii=False)
 print(f"  Consolidado guardado en: {out}")
-PYEOF
+PYSCRIPT
+
+"$PYTHON_CMD" "$PY_GRYPE_SUMMARY" "$GRYPE_DIR"
+rm -f "$PY_GRYPE_SUMMARY" 2>/dev/null || true
 
 log ""
 ok "Escaneo con Grype completado"
 info "Reportes en: ${GRYPE_DIR}/"
 log ""
 info "Proximo paso:"
-log "    Subir a plataformas: ${C}${PYTHON_CMD} scripts/upload_reports.py${N}"
+if [ "$IS_WINDOWS" = true ]; then
+    log "    Subir a plataformas: ${C}${PYTHON_CMD} scripts/upload_reports.py${N}"
+else
+    log "    Subir a plataformas: ${C}${PYTHON_CMD} scripts/upload_reports.py${N}"
+fi
 log ""

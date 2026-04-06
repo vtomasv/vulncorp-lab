@@ -1,80 +1,123 @@
-#!/bin/bash
+#!/usr/bin/env bash
 ###############################################################################
-#  VulnCorp Lab — Script de Setup Inicial
-#  Curso MAR303 — Universidad Mayor — 2026
+#  VulnCorp Lab -- Script de Setup Inicial
+#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE -- 2026
 #
 #  Ejecutar UNA VEZ antes de iniciar el laboratorio.
-#  Instala Trivy y descarga las imágenes Docker necesarias.
+#  Instala Trivy y descarga las imagenes Docker necesarias.
 #
-#  Compatible con: AMD64 (Intel/AMD) y ARM64 (Apple Silicon M1/M2/M3/M4)
+#  Compatible con: Linux, macOS, Windows (Git Bash MINGW64 / WSL2)
 ###############################################################################
 
 set -e
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# --- Detectar plataforma ---
+PLATFORM="linux"
+IS_WINDOWS=false
+IS_MACOS=false
 
-echo ""
-echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${CYAN}║       VulnCorp Lab — Setup Inicial                          ║${NC}"
-echo -e "${BOLD}${CYAN}║       Gestión de Vulnerabilidades (MITRE) — 2026            ║${NC}"
-echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        PLATFORM="windows"
+        IS_WINDOWS=true
+        ;;
+    Darwin*)
+        PLATFORM="macos"
+        IS_MACOS=true
+        ;;
+    Linux*)
+        if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+            PLATFORM="wsl2"
+        fi
+        ;;
+esac
+
+# --- Colores (compatibles con Git Bash) ---
+R=''; G=''; Y=''; C=''; BOLD=''; N=''
+if [ -t 1 ]; then
+    if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    elif [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    fi
+fi
+
+log()  { printf "%b\n" "$*"; }
+ok()   { log "  ${G}[OK]${N} $*"; }
+warn() { log "  ${Y}[!]${N} $*"; }
+fail() { log "  ${R}[X]${N} $*"; }
+info() { log "  ${C}[i]${N} $*"; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+log ""
+log "${BOLD}${C}+==============================================================+${N}"
+log "${BOLD}${C}|       VulnCorp Lab -- Setup Inicial                          |${N}"
+log "${BOLD}${C}|       Gestion de Vulnerabilidades (MITRE) -- 2026            |${N}"
+log "${BOLD}${C}+==============================================================+${N}"
+log ""
 
 # 1. Verificar Docker y Docker Compose
-echo -e "${YELLOW}[1/4] Verificando requisitos del sistema...${NC}"
+log "${Y}[1/4] Verificando requisitos del sistema...${N}"
 
-# Detectar arquitectura
 ARCH=$(uname -m)
-echo -e "  [i] Arquitectura detectada: ${BOLD}${ARCH}${NC}"
+info "Arquitectura detectada: ${BOLD}${ARCH}${N}"
+info "Plataforma: ${BOLD}${PLATFORM}${N}"
+
 if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
-    echo -e "  [i] Sistema ARM64 (Apple Silicon / ARM). Imágenes compatibles seleccionadas."
+    info "Sistema ARM64 (Apple Silicon / ARM). Imagenes compatibles seleccionadas."
 elif [ "$ARCH" = "x86_64" ]; then
-    echo -e "  [i] Sistema AMD64 (Intel/AMD). Todas las imágenes son compatibles."
+    info "Sistema AMD64 (Intel/AMD). Todas las imagenes son compatibles."
 fi
 
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}[✗] Docker no está instalado. Instálelo desde https://docs.docker.com/get-docker/${NC}"
+if ! command -v docker >/dev/null 2>&1; then
+    fail "Docker no esta instalado. Instalelo desde https://docs.docker.com/get-docker/"
     exit 1
 fi
-echo -e "${GREEN}  [✓] Docker: $(docker --version)${NC}"
+ok "Docker: $(docker --version)"
 
-if ! docker compose version &> /dev/null 2>&1; then
-    if ! command -v docker-compose &> /dev/null; then
-        echo -e "${RED}[✗] Docker Compose no está instalado.${NC}"
+COMPOSE_CMD="docker compose"
+if ! docker compose version >/dev/null 2>&1; then
+    if command -v docker-compose >/dev/null 2>&1; then
+        ok "Docker Compose: $(docker-compose --version)"
+        COMPOSE_CMD="docker-compose"
+    else
+        fail "Docker Compose no esta instalado."
         exit 1
     fi
-    echo -e "${GREEN}  [✓] Docker Compose: $(docker-compose --version)${NC}"
-    COMPOSE_CMD="docker-compose"
 else
-    echo -e "${GREEN}  [✓] Docker Compose: $(docker compose version)${NC}"
-    COMPOSE_CMD="docker compose"
+    ok "Docker Compose: $(docker compose version)"
 fi
 
 # 2. Instalar Trivy
-echo ""
-echo -e "${YELLOW}[2/4] Instalando Trivy (escáner de vulnerabilidades)...${NC}"
+log ""
+log "${Y}[2/4] Instalando Trivy (escaner de vulnerabilidades)...${N}"
 
-if ! command -v trivy &> /dev/null; then
-    echo -e "  Descargando e instalando Trivy..."
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    if [ "$OS" = "darwin" ] && command -v brew &> /dev/null; then
+if ! command -v trivy >/dev/null 2>&1; then
+    info "Descargando e instalando Trivy..."
+    if [ "$IS_MACOS" = true ] && command -v brew >/dev/null 2>&1; then
         brew install trivy
+    elif [ "$IS_WINDOWS" = true ]; then
+        # En Git Bash, no hay sudo ni apt. Indicar al usuario.
+        fail "Trivy no encontrado. En Windows, instale con:"
+        log "    choco install trivy"
+        log "    scoop install trivy"
+        log "    winget install AquaSecurity.Trivy"
+        exit 1
     else
         curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
     fi
-    echo -e "${GREEN}  [✓] Trivy instalado: $(trivy --version 2>/dev/null | head -1)${NC}"
+    ok "Trivy instalado: $(trivy --version 2>/dev/null | head -1)"
 else
-    echo -e "${GREEN}  [✓] Trivy ya instalado: $(trivy --version 2>/dev/null | head -1)${NC}"
+    ok "Trivy ya instalado: $(trivy --version 2>/dev/null | head -1)"
 fi
 
-# 3. Descargar imágenes Docker (todas compatibles ARM64 + AMD64)
-echo ""
-echo -e "${YELLOW}[3/4] Descargando imágenes Docker (esto puede tomar varios minutos)...${NC}"
+# 3. Descargar imagenes Docker (todas compatibles ARM64 + AMD64)
+log ""
+log "${Y}[3/4] Descargando imagenes Docker (esto puede tomar varios minutos)...${N}"
 
 IMAGES=(
     "nginx:1.21.0"
@@ -88,36 +131,45 @@ IMAGES=(
 )
 
 for img in "${IMAGES[@]}"; do
-    echo -e "  Descargando ${CYAN}${img}${NC}..."
+    info "Descargando ${C}${img}${N}..."
     if docker pull "$img" --quiet 2>/dev/null; then
-        echo -e "${GREEN}  [✓] ${img}${NC}"
+        ok "${img}"
     elif docker pull "$img" 2>&1 | tail -1; then
-        echo -e "${GREEN}  [✓] ${img}${NC}"
+        ok "${img}"
     else
-        echo -e "${RED}  [✗] Error descargando ${img}${NC}"
-        echo -e "${YELLOW}      Si está en Apple Silicon, intente: docker pull --platform linux/amd64 ${img}${NC}"
+        fail "Error descargando ${img}"
+        if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+            warn "En Apple Silicon, intente: docker pull --platform linux/amd64 ${img}"
+        fi
     fi
 done
 
 # 4. Construir el dashboard
-echo ""
-echo -e "${YELLOW}[4/4] Construyendo el dashboard de vulnerabilidades...${NC}"
+log ""
+log "${Y}[4/4] Construyendo el dashboard de vulnerabilidades...${N}"
 
-cd "$(dirname "$0")/.."
+cd "$PROJECT_DIR"
 $COMPOSE_CMD build vuln-dashboard 2>/dev/null || {
-    echo -e "${YELLOW}  [!] El dashboard se construirá al iniciar el laboratorio${NC}"
+    warn "El dashboard se construira al iniciar el laboratorio"
 }
 
-echo ""
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  [✓] Setup completado exitosamente                         ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  Próximos pasos:"
-echo -e "  ${CYAN}1.${NC} Iniciar el laboratorio:  ${BOLD}docker compose up -d${NC}"
-echo -e "  ${CYAN}2.${NC} Esperar ~2 min a que PrestaShop se instale"
-echo -e "  ${CYAN}3.${NC} Ejecutar el escaneo:     ${BOLD}./scripts/scan.sh${NC}"
-echo -e "  ${CYAN}4.${NC} Abrir el dashboard:      ${BOLD}http://localhost:3000${NC}"
-echo -e "  ${CYAN}5.${NC} Abrir PetaShop:          ${BOLD}http://localhost:8080${NC}"
-echo -e "  ${CYAN}6.${NC} Abrir phpMyAdmin:         ${BOLD}http://localhost:8081${NC}"
-echo ""
+log ""
+log "${G}${BOLD}+==============================================================+${N}"
+log "${G}${BOLD}|  [OK] Setup completado exitosamente                          |${N}"
+log "${G}${BOLD}+==============================================================+${N}"
+log ""
+log "  Proximos pasos:"
+log "  ${C}1.${N} Iniciar el laboratorio:  ${BOLD}docker compose up -d${N}"
+log "  ${C}2.${N} Esperar ~2 min a que PrestaShop se instale"
+
+if [ "$IS_WINDOWS" = true ]; then
+    log "  ${C}3.${N} Ejecutar el escaneo:     ${BOLD}.\\scripts\\scan.ps1${N}  (PowerShell recomendado)"
+    log "       o bien:               ${BOLD}bash scripts/scan.sh${N}  (Git Bash)"
+else
+    log "  ${C}3.${N} Ejecutar el escaneo:     ${BOLD}./scripts/scan.sh${N}"
+fi
+
+log "  ${C}4.${N} Abrir el dashboard:      ${BOLD}http://localhost:3000${N}"
+log "  ${C}5.${N} Abrir PetaShop:          ${BOLD}http://localhost:8080${N}"
+log "  ${C}6.${N} Abrir phpMyAdmin:         ${BOLD}http://localhost:8081${N}"
+log ""

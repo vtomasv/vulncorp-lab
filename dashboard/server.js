@@ -15,7 +15,7 @@
  * 2. BOM UTF-16 LE (FF FE) si PowerShell uso Set-Content -Encoding Unicode
  * 3. Line endings CRLF en lugar de LF
  * 4. Caracteres nulos intercalados (UTF-16 mal decodificado)
- * 5. Latencia en bind-mounts de Docker Desktop para Windows
+ * 5. Latencia en bind-mounts de Docker Desktop para Windows (polling)
  */
 
 const express = require('express');
@@ -26,10 +26,15 @@ const path = require('path');
 const app = express();
 const PORT = 3000;
 
-// Directorio de datos
+// Directorio de datos: dentro del contenedor o local para desarrollo
 const DATA_DIR = fs.existsSync('/app/data')
     ? '/app/data'
     : path.join(__dirname, '..', 'data');
+
+// Cache en memoria para el reporte (evita releer archivos en cada request)
+let cachedReport = null;
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 5000; // 5 segundos
 
 console.log(`[VulnCorp] Inicio: ${new Date().toISOString()}`);
 console.log(`[VulnCorp] Directorio de datos: ${DATA_DIR}`);
@@ -62,13 +67,22 @@ function readFileSafe(filePath) {
         // Detectar BOM UTF-16 LE (FF FE) - PowerShell a veces genera esto
         if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
             console.log(`[VulnCorp] BOM UTF-16LE detectado en: ${path.basename(filePath)}`);
-            // Decodificar como UTF-16LE, saltando el BOM
             content = buf.slice(2).toString('utf16le');
         }
         // Detectar BOM UTF-8 (EF BB BF)
         else if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
             console.log(`[VulnCorp] BOM UTF-8 detectado en: ${path.basename(filePath)}`);
             content = buf.slice(3).toString('utf8');
+        }
+        // Detectar UTF-16 sin BOM (null bytes intercalados)
+        else if (buf.length >= 4 && (buf[1] === 0x00 || buf[0] === 0x00)) {
+            // Heuristica: si hay null bytes en las primeras posiciones, es UTF-16
+            try {
+                content = buf.toString('utf16le');
+                console.log(`[VulnCorp] UTF-16LE sin BOM detectado en: ${path.basename(filePath)}`);
+            } catch (e) {
+                content = buf.toString('utf8');
+            }
         }
         else {
             content = buf.toString('utf8');
@@ -152,94 +166,147 @@ function listDataFiles(suffix) {
 }
 
 /**
+ * Obtiene la fecha de modificacion mas reciente de los archivos de datos.
+ */
+function getLatestModTime() {
+    try {
+        if (!fs.existsSync(DATA_DIR)) return 0;
+        const files = fs.readdirSync(DATA_DIR);
+        let latest = 0;
+        for (const f of files) {
+            try {
+                const fp = path.join(DATA_DIR, f);
+                const st = fs.statSync(fp);
+                if (st.isFile() && st.mtimeMs > latest) {
+                    latest = st.mtimeMs;
+                }
+            } catch (e) { /* ignorar */ }
+        }
+        return latest;
+    } catch (e) {
+        return 0;
+    }
+}
+
+/**
  * Construye el reporte consolidado desde multiples fuentes.
  * Orden de prioridad:
  *   1. consolidated_report.json (pre-generado por scan.sh/scan.ps1)
  *   2. scan_summary.jsonl (resumen por servicio)
  *   3. Archivos _trivy.json individuales (fallback)
+ *
+ * Usa cache en memoria con TTL de 5 segundos para evitar releer
+ * archivos en cada request (importante para bind-mounts lentos de Windows).
  */
-function buildConsolidatedReport() {
+function buildConsolidatedReport(forceRefresh) {
+    const now = Date.now();
+
+    // Verificar cache
+    if (!forceRefresh && cachedReport && (now - cacheTimestamp) < CACHE_TTL_MS) {
+        return cachedReport;
+    }
+
+    // Verificar si los archivos cambiaron
+    const latestMod = getLatestModTime();
+    if (!forceRefresh && cachedReport && latestMod <= cacheTimestamp) {
+        return cachedReport;
+    }
+
+    let report = null;
+
     // Opcion 1: Reporte consolidado pre-generado
     const consolidatedPath = path.join(DATA_DIR, 'consolidated_report.json');
     if (fs.existsSync(consolidatedPath)) {
         const data = readJsonSafe(consolidatedPath);
         if (data && data.services && data.services.length > 0) {
             data.source = 'consolidated_report.json';
-            return data;
+            report = data;
         }
     }
 
     // Opcion 2: Leer scan_summary.jsonl
-    const summaryPath = path.join(DATA_DIR, 'scan_summary.jsonl');
-    if (fs.existsSync(summaryPath)) {
-        const services = readJsonlSafe(summaryPath);
-        if (services.length > 0) {
-            let tc = 0, th = 0, tm = 0, tl = 0;
-            services.forEach(s => {
-                tc += s.critical || 0;
-                th += s.high || 0;
-                tm += s.medium || 0;
-                tl += s.low || 0;
-            });
-            return {
-                scan_timestamp: services[0].timestamp || new Date().toISOString(),
-                total_services: services.length,
-                total_vulnerabilities: tc + th + tm + tl,
-                by_severity: { critical: tc, high: th, medium: tm, low: tl },
-                services: services,
-                source: 'scan_summary.jsonl'
-            };
+    if (!report) {
+        const summaryPath = path.join(DATA_DIR, 'scan_summary.jsonl');
+        if (fs.existsSync(summaryPath)) {
+            const services = readJsonlSafe(summaryPath);
+            if (services.length > 0) {
+                let tc = 0, th = 0, tm = 0, tl = 0;
+                services.forEach(s => {
+                    tc += s.critical || 0;
+                    th += s.high || 0;
+                    tm += s.medium || 0;
+                    tl += s.low || 0;
+                });
+                report = {
+                    scan_timestamp: services[0].timestamp || new Date().toISOString(),
+                    total_services: services.length,
+                    total_vulnerabilities: tc + th + tm + tl,
+                    by_severity: { critical: tc, high: th, medium: tm, low: tl },
+                    services: services,
+                    source: 'scan_summary.jsonl'
+                };
+            }
         }
     }
 
     // Opcion 3: Construir desde archivos _trivy.json individuales
-    const trivyFiles = listDataFiles('_trivy.json');
-    if (trivyFiles.length === 0) return null;
+    if (!report) {
+        const trivyFiles = listDataFiles('_trivy.json');
+        if (trivyFiles.length > 0) {
+            console.log(`[VulnCorp] Construyendo reporte desde ${trivyFiles.length} archivos Trivy`);
+            const services = [];
+            let tc = 0, th = 0, tm = 0, tl = 0;
 
-    console.log(`[VulnCorp] Construyendo reporte desde ${trivyFiles.length} archivos Trivy`);
-    const services = [];
-    let tc = 0, th = 0, tm = 0, tl = 0;
+            trivyFiles.forEach(file => {
+                const serviceName = file.replace('_trivy.json', '');
+                const data = readJsonSafe(path.join(DATA_DIR, file));
+                if (!data) return;
 
-    trivyFiles.forEach(file => {
-        const serviceName = file.replace('_trivy.json', '');
-        const data = readJsonSafe(path.join(DATA_DIR, file));
-        if (!data) return;
+                let critical = 0, high = 0, medium = 0, low = 0;
+                (data.Results || []).forEach(result => {
+                    (result.Vulnerabilities || []).forEach(vuln => {
+                        switch (vuln.Severity) {
+                            case 'CRITICAL': critical++; break;
+                            case 'HIGH': high++; break;
+                            case 'MEDIUM': medium++; break;
+                            case 'LOW': low++; break;
+                        }
+                    });
+                });
 
-        let critical = 0, high = 0, medium = 0, low = 0;
-        (data.Results || []).forEach(result => {
-            (result.Vulnerabilities || []).forEach(vuln => {
-                switch (vuln.Severity) {
-                    case 'CRITICAL': critical++; break;
-                    case 'HIGH': high++; break;
-                    case 'MEDIUM': medium++; break;
-                    case 'LOW': low++; break;
-                }
+                const total = critical + high + medium + low;
+                services.push({
+                    service: serviceName,
+                    image: serviceName,
+                    zone: 'desconocida',
+                    exposure: 'desconocida',
+                    criticality: 'desconocida',
+                    critical, high, medium, low, total,
+                    timestamp: new Date().toISOString()
+                });
+                tc += critical; th += high; tm += medium; tl += low;
             });
-        });
 
-        const total = critical + high + medium + low;
-        services.push({
-            service: serviceName,
-            image: serviceName,
-            zone: 'desconocida',
-            exposure: 'desconocida',
-            criticality: 'desconocida',
-            critical, high, medium, low, total,
-            timestamp: new Date().toISOString()
-        });
-        tc += critical; th += high; tm += medium; tl += low;
-    });
+            if (services.length > 0) {
+                report = {
+                    scan_timestamp: new Date().toISOString(),
+                    total_services: services.length,
+                    total_vulnerabilities: tc + th + tm + tl,
+                    by_severity: { critical: tc, high: th, medium: tm, low: tl },
+                    services: services,
+                    source: 'trivy_files_dynamic'
+                };
+            }
+        }
+    }
 
-    if (services.length === 0) return null;
+    // Actualizar cache
+    if (report) {
+        cachedReport = report;
+        cacheTimestamp = now;
+    }
 
-    return {
-        scan_timestamp: new Date().toISOString(),
-        total_services: services.length,
-        total_vulnerabilities: tc + th + tm + tl,
-        by_severity: { critical: tc, high: th, medium: tm, low: tl },
-        services: services,
-        source: 'trivy_files_dynamic'
-    };
+    return report;
 }
 
 // =====================================================================
@@ -248,7 +315,7 @@ function buildConsolidatedReport() {
 
 // --- Reporte consolidado ---
 app.get('/api/report', (req, res) => {
-    const report = buildConsolidatedReport();
+    const report = buildConsolidatedReport(false);
     if (report) return res.json(report);
 
     res.json({
@@ -351,10 +418,12 @@ app.get('/api/decisions', (req, res) => {
     res.json([]);
 });
 
-// --- Forzar recarga de datos ---
+// --- Forzar recarga de datos (invalida cache) ---
 app.post('/api/reload', (req, res) => {
     console.log('[VulnCorp] Recarga forzada solicitada');
-    const report = buildConsolidatedReport();
+    cachedReport = null;
+    cacheTimestamp = 0;
+    const report = buildConsolidatedReport(true);
     if (report) {
         res.json({ success: true, message: 'Datos recargados', report });
     } else {
@@ -371,6 +440,8 @@ app.get('/api/debug', (req, res) => {
         arch: process.arch,
         node_version: process.version,
         timestamp: new Date().toISOString(),
+        cache_age_ms: Date.now() - cacheTimestamp,
+        cache_valid: cachedReport !== null,
         files: []
     };
 
@@ -394,6 +465,8 @@ app.get('/api/debug', (req, res) => {
                             result.encoding = 'UTF-8 with BOM';
                         } else if (b0 === 0xFF && b1 === 0xFE) {
                             result.encoding = 'UTF-16LE with BOM';
+                        } else if (buf.length >= 4 && (buf[1] === 0x00 || buf[0] === 0x00)) {
+                            result.encoding = 'Possible UTF-16 (null bytes detected)';
                         } else {
                             result.encoding = 'UTF-8 (no BOM)';
                         }
@@ -406,6 +479,11 @@ app.get('/api/debug', (req, res) => {
                             result.parseable = data !== null && (Array.isArray(data) ? data.length > 0 : true);
                             if (data && !Array.isArray(data) && data.Results) {
                                 result.results_count = data.Results.length;
+                                let vulnCount = 0;
+                                (data.Results || []).forEach(r => {
+                                    vulnCount += (r.Vulnerabilities || []).length;
+                                });
+                                result.vulnerability_count = vulnCount;
                             }
                         }
                     }
@@ -421,6 +499,44 @@ app.get('/api/debug', (req, res) => {
 
     res.json(info);
 });
+
+// =====================================================================
+//  File Watcher (para detectar nuevos archivos sin reiniciar)
+// =====================================================================
+
+/**
+ * Monitorea el directorio de datos para invalidar el cache cuando
+ * se agregan o modifican archivos. Usa polling porque fs.watch no
+ * funciona de forma confiable con bind-mounts de Docker Desktop en Windows.
+ */
+let lastKnownFiles = '';
+
+function pollForChanges() {
+    try {
+        if (!fs.existsSync(DATA_DIR)) return;
+        const files = fs.readdirSync(DATA_DIR)
+            .filter(f => f.endsWith('.json') || f.endsWith('.jsonl'))
+            .sort();
+        let fingerprint = '';
+        for (const f of files) {
+            try {
+                const st = fs.statSync(path.join(DATA_DIR, f));
+                fingerprint += `${f}:${st.size}:${st.mtimeMs};`;
+            } catch (e) { /* ignorar */ }
+        }
+        if (fingerprint !== lastKnownFiles) {
+            if (lastKnownFiles !== '') {
+                console.log(`[VulnCorp] Cambios detectados en archivos de datos. Invalidando cache.`);
+                cachedReport = null;
+                cacheTimestamp = 0;
+            }
+            lastKnownFiles = fingerprint;
+        }
+    } catch (e) { /* ignorar */ }
+}
+
+// Polling cada 3 segundos (funciona con bind-mounts lentos de Windows)
+setInterval(pollForChanges, 3000);
 
 // =====================================================================
 //  Iniciar servidor
@@ -449,6 +565,7 @@ app.listen(PORT, '0.0.0.0', () => {
                 let enc = 'UTF-8';
                 if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) enc = 'UTF-8+BOM';
                 if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) enc = 'UTF-16LE';
+                if (buf.length >= 4 && (buf[1] === 0x00 || buf[0] === 0x00) && enc === 'UTF-8') enc = 'UTF-16?';
                 console.log(`  - ${f} (${stats.size} bytes, ${enc})`);
             } catch (e) { /* ignorar */ }
         });
@@ -459,4 +576,7 @@ app.listen(PORT, '0.0.0.0', () => {
     } else {
         console.log(`[VulnCorp] ADVERTENCIA: Directorio no encontrado: ${DATA_DIR}`);
     }
+
+    // Inicializar polling
+    pollForChanges();
 });

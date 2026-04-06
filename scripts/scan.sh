@@ -1,40 +1,48 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  VulnCorp Lab — Escaneo de Vulnerabilidades con Trivy
-#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE — 2026
+#  VulnCorp Lab -- Escaneo de Vulnerabilidades con Trivy
+#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE -- 2026
 #
-#  Compatible con: Linux, macOS, Windows (Git Bash / WSL2)
+#  Compatible con: Linux, macOS, Windows (Git Bash MINGW64 / WSL2)
 #
 #  IMPORTANTE: Este script NUNCA usa el flag --output de Trivy porque tiene
 #  bugs conocidos en Windows (Issue #1698, #8884). En su lugar, usa
 #  redireccion de stdout del shell (>) que funciona en todos los OS.
 #
+#  Para Windows se recomienda usar scan.ps1 (PowerShell nativo).
+#  Este script funciona en Git Bash pero PowerShell es mas confiable.
+#
 #  Uso:
 #    ./scripts/scan.sh              # Modo normal
-#    ./scripts/scan.sh --verbose    # Modo verbose (muestra salida de Trivy)
+#    ./scripts/scan.sh --verbose    # Modo verbose
 ###############################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Detectar plataforma ---
 PLATFORM="linux"
 IS_WINDOWS=false
-IS_MACOS=false
+IS_GITBASH=false
 
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*)
         PLATFORM="windows-gitbash"
+        IS_WINDOWS=true
+        IS_GITBASH=true
+        # Desactivar conversion de rutas de MSYS para este script
+        export MSYS_NO_PATHCONV=1
+        export MSYS2_ARG_CONV_EXCL="*"
+        ;;
+    CYGWIN*)
+        PLATFORM="windows-cygwin"
         IS_WINDOWS=true
         ;;
     Darwin*)
         PLATFORM="macos"
-        IS_MACOS=true
         ;;
     Linux*)
-        if grep -qi microsoft /proc/version 2>/dev/null; then
+        if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
             PLATFORM="wsl2"
-        else
-            PLATFORM="linux"
         fi
         ;;
 esac
@@ -44,7 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="${PROJECT_DIR}/data"
 LOG_FILE="${DATA_DIR}/scan.log"
-TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S" 2>/dev/null || echo "unknown")
 
 mkdir -p "$DATA_DIR"
 
@@ -54,12 +62,22 @@ if [ "${1:-}" = "--verbose" ] || [ "${1:-}" = "-v" ]; then
     VERBOSE=true
 fi
 
-# --- Colores (solo si la terminal los soporta) ---
-if [ -t 1 ] && command -v tput &>/dev/null && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
-    R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-    C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
-else
-    R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
+# --- Colores ---
+R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
+if [ -t 1 ]; then
+    # Git Bash soporta ANSI, pero tput puede fallar
+    if command -v tput >/dev/null 2>&1; then
+        nc=$(tput colors 2>/dev/null) || nc=0
+        if [ "${nc:-0}" -ge 8 ]; then
+            R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+            C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+        fi
+    fi
+    # Fallback: si TERM esta definido
+    if [ -z "$N" ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+    fi
 fi
 
 # --- Funciones de logging ---
@@ -70,20 +88,20 @@ fail() { log "  ${R}[X]${N} $*"; }
 info() { log "  ${C}[i]${N} $*"; }
 
 log_to_file() {
-    echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"
+    printf "[%s] %s\n" "$(date +%H:%M:%S 2>/dev/null || echo '??:??:??')" "$*" >> "$LOG_FILE"
 }
 
 # --- Iniciar log ---
-echo "=== VulnCorp Scan Log ===" > "$LOG_FILE"
+printf "=== VulnCorp Scan Log ===\n" > "$LOG_FILE"
 log_to_file "Timestamp: $TIMESTAMP"
 log_to_file "Platform: $PLATFORM"
-log_to_file "Shell: $BASH_VERSION"
+log_to_file "Shell: ${BASH_VERSION:-unknown}"
 log_to_file "DataDir: $DATA_DIR"
 
 # --- Detectar Python ---
 PYTHON_CMD=""
 for cmd in python3 python py; do
-    if command -v "$cmd" &>/dev/null; then
+    if command -v "$cmd" >/dev/null 2>&1; then
         ver=$("$cmd" --version 2>&1 || true)
         if echo "$ver" | grep -q "Python 3"; then
             PYTHON_CMD="$cmd"
@@ -97,8 +115,92 @@ if [ -z "$PYTHON_CMD" ]; then
     exit 1
 fi
 
+# --- Funcion para limpiar BOM de un archivo (usa Python, funciona en todos los OS) ---
+clean_bom() {
+    local filepath="$1"
+    [ ! -f "$filepath" ] && return 0
+
+    "$PYTHON_CMD" -c "
+import sys
+fp = sys.argv[1]
+with open(fp, 'rb') as f:
+    raw = f.read()
+if raw[:3] == b'\xef\xbb\xbf':
+    with open(fp, 'wb') as f: f.write(raw[3:])
+elif raw[:2] == b'\xff\xfe':
+    t = raw[2:].decode('utf-16-le')
+    with open(fp, 'wb') as f: f.write(t.encode('utf-8'))
+elif b'\x00' in raw[:100]:
+    try:
+        t = raw.decode('utf-16')
+        with open(fp, 'wb') as f: f.write(t.encode('utf-8'))
+    except: pass
+" "$filepath" 2>/dev/null || true
+}
+
+# --- Funcion para contar vulnerabilidades ---
+count_vulns() {
+    local report_file="$1"
+    local py_script="${DATA_DIR}/_count_vulns_tmp.py"
+
+    # Escribir script Python a archivo (evita heredoc inline con problemas CRLF)
+    cat > "$py_script" << 'PYSCRIPT'
+import json, sys
+try:
+    with open(sys.argv[1], 'rb') as f:
+        raw = f.read()
+    if raw[:3] == b'\xef\xbb\xbf': raw = raw[3:]
+    if raw[:2] == b'\xff\xfe': raw = raw.decode('utf-16-le').encode('utf-8')
+    text = raw.decode('utf-8', errors='ignore').strip()
+    if not text:
+        print('0 0 0 0 0')
+        sys.exit(0)
+    data = json.loads(text)
+    c = h = m = l = 0
+    for r in data.get('Results', []):
+        for v in (r.get('Vulnerabilities') or []):
+            s = v.get('Severity', '')
+            if s == 'CRITICAL': c += 1
+            elif s == 'HIGH': h += 1
+            elif s == 'MEDIUM': m += 1
+            elif s == 'LOW': l += 1
+    print(f'{c} {h} {m} {l} {c+h+m+l}')
+except Exception as e:
+    print('0 0 0 0 0')
+    print(f'ERROR: {e}', file=sys.stderr)
+PYSCRIPT
+
+    "$PYTHON_CMD" "$py_script" "$report_file" 2>>"$LOG_FILE"
+    rm -f "$py_script" 2>/dev/null || true
+}
+
+# --- Funcion para diagnosticar JSON ---
+diagnose_json() {
+    local report_file="$1"
+    local py_script="${DATA_DIR}/_diag_tmp.py"
+
+    cat > "$py_script" << 'PYSCRIPT'
+import json, sys
+try:
+    with open(sys.argv[1], 'rb') as f:
+        raw = f.read()
+    if raw[:3] == b'\xef\xbb\xbf': raw = raw[3:]
+    text = raw.decode('utf-8', errors='ignore').strip()
+    data = json.loads(text)
+    results = data.get('Results', [])
+    pkgs = sum(len(r.get('Packages', [])) for r in results)
+    has_v = any('Vulnerabilities' in r for r in results)
+    print(f'{len(results)} {pkgs} {has_v}')
+except Exception as e:
+    print('0 0 False')
+    print(f'ERROR: {e}', file=sys.stderr)
+PYSCRIPT
+
+    "$PYTHON_CMD" "$py_script" "$report_file" 2>/dev/null
+    rm -f "$py_script" 2>/dev/null || true
+}
+
 # --- Imagenes a escanear ---
-# Formato: nombre|imagen|zona|exposicion|criticidad
 SERVICES=(
     "nginx-proxy|nginx:1.21.0|produccion|internet|alta"
     "prestashop|prestashop/prestashop:1.7.8.0|produccion|internet-via-proxy|critica"
@@ -120,13 +222,17 @@ log "${BOLD}${C}|     Unidad 1: Gestion de Vulnerabilidades (MITRE)          |${
 log "${BOLD}${C}+============================================================+${N}"
 log ""
 info "Plataforma: ${PLATFORM}"
+info "Python:     ${PYTHON_CMD}"
 info "Directorio: ${DATA_DIR}"
+if [ "$IS_GITBASH" = true ]; then
+    info "Git Bash detectado. Recomendacion: use scan.ps1 en PowerShell para mejor compatibilidad."
+fi
 log ""
 
 log "${Y}[1/4] Verificando herramientas...${N}"
 
 # Docker
-if command -v docker &>/dev/null; then
+if command -v docker >/dev/null 2>&1; then
     docker_ver=$(docker --version 2>&1 || echo "desconocida")
     ok "Docker: ${docker_ver}"
 else
@@ -135,7 +241,7 @@ else
 fi
 
 # Trivy
-if ! command -v trivy &>/dev/null; then
+if ! command -v trivy >/dev/null 2>&1; then
     fail "Trivy no encontrado."
     info "Instale con:"
     log "    Linux:   sudo apt install trivy  /  brew install trivy"
@@ -166,18 +272,17 @@ db_ok=false
 for attempt in 1 2 3; do
     log_to_file "DB download attempt $attempt/3"
 
-    db_err="${DATA_DIR}/db_download.err"
-    if trivy image --download-db-only > /dev/null 2>"$db_err"; then
+    if trivy image --download-db-only > /dev/null 2>"${DATA_DIR}/db_download.err"; then
         db_ok=true
         ok "Base de datos actualizada"
-        rm -f "$db_err"
+        rm -f "${DATA_DIR}/db_download.err"
         break
     fi
 
     warn "Intento $attempt/3 fallido."
-    if [ -f "$db_err" ]; then
-        tail -3 "$db_err" | while read -r line; do
-            log "    $line"
+    if [ -f "${DATA_DIR}/db_download.err" ]; then
+        tail -3 "${DATA_DIR}/db_download.err" 2>/dev/null | while IFS= read -r errline; do
+            log "    $errline"
         done
     fi
     info "Limpiando DB y reintentando..."
@@ -233,21 +338,22 @@ scan_image() {
 
         # ---- ESCANEO ----
         # CLAVE: Usamos redireccion de stdout (>) en lugar de --output.
-        # Esto funciona en todos los OS porque el shell maneja la escritura.
         log_to_file "Running: trivy image --format json --skip-db-update $image > $report_file"
 
-        if $VERBOSE; then
-            trivy image --format json \
-                --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-                --skip-db-update \
-                "$image" > "$report_file" 2> >(tee "$trivy_stderr" >&2)
-            local exit_code=$?
-        else
-            trivy image --format json \
-                --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-                --skip-db-update \
-                "$image" > "$report_file" 2>"$trivy_stderr"
-            local exit_code=$?
+        local exit_code=0
+        trivy image --format json \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-db-update \
+            "$image" > "$report_file" 2>"$trivy_stderr"
+        exit_code=$?
+
+        # Mostrar stderr si verbose
+        if [ "$VERBOSE" = true ] && [ -f "$trivy_stderr" ] && [ -s "$trivy_stderr" ]; then
+            log "  --- Salida de Trivy (stderr) ---"
+            while IFS= read -r errline; do
+                log "    $errline"
+            done < "$trivy_stderr"
+            log "  --- Fin ---"
         fi
 
         log_to_file "Exit code: $exit_code"
@@ -255,8 +361,8 @@ scan_image() {
         if [ $exit_code -ne 0 ]; then
             fail "Trivy fallo (exit code: $exit_code)"
             if [ -f "$trivy_stderr" ]; then
-                tail -5 "$trivy_stderr" | while read -r line; do
-                    log "    $line"
+                tail -5 "$trivy_stderr" 2>/dev/null | while IFS= read -r errline; do
+                    log "    $errline"
                 done
             fi
             continue
@@ -269,74 +375,37 @@ scan_image() {
         fi
 
         local file_size
-        file_size=$(wc -c < "$report_file" | tr -d ' ')
-        if [ "$file_size" -lt 10 ]; then
-            warn "Reporte muy pequeno ($file_size bytes)"
+        file_size=$(wc -c < "$report_file" 2>/dev/null | tr -d ' \r\n')
+        if [ "${file_size:-0}" -lt 10 ]; then
+            warn "Reporte muy pequeno (${file_size:-0} bytes)"
             continue
         fi
 
-        # Limpiar BOM si existe (Windows puede agregar BOM via redireccion)
-        local first_bytes
-        first_bytes=$(xxd -l 3 -p "$report_file" 2>/dev/null || od -A n -t x1 -N 3 "$report_file" 2>/dev/null | tr -d ' ')
-        if [ "$first_bytes" = "efbbbf" ]; then
-            log_to_file "BOM detectado en $report_file - eliminando"
-            tail -c +4 "$report_file" > "${report_file}.tmp" && mv "${report_file}.tmp" "$report_file"
-        fi
+        # Limpiar BOM si existe
+        clean_bom "$report_file"
 
         info "Archivo generado: ${file_size} bytes"
         log_to_file "Report size: $file_size bytes"
 
         # ---- CONTAR VULNERABILIDADES ----
         local counts
-        counts=$("$PYTHON_CMD" -c "
-import json, sys
-try:
-    with open('''${report_file}''', encoding='utf-8-sig') as f:
-        raw = f.read()
-    raw = raw.lstrip('\ufeff').replace('\x00', '').strip()
-    if not raw:
-        print('0 0 0 0 0')
-        sys.exit(0)
-    data = json.loads(raw)
-    c = h = m = l = 0
-    for r in data.get('Results', []):
-        for v in (r.get('Vulnerabilities') or []):
-            s = v.get('Severity', '')
-            if s == 'CRITICAL': c += 1
-            elif s == 'HIGH': h += 1
-            elif s == 'MEDIUM': m += 1
-            elif s == 'LOW': l += 1
-    print(f'{c} {h} {m} {l} {c+h+m+l}')
-except Exception as e:
-    print('0 0 0 0 0', file=sys.stdout)
-    print(f'ERROR: {e}', file=sys.stderr)
-" 2>>"$LOG_FILE")
+        counts=$(count_vulns "$report_file")
 
-        # Parsear resultado
         read -r crit high med low total <<< "$counts"
         crit=${crit:-0}; high=${high:-0}; med=${med:-0}; low=${low:-0}; total=${total:-0}
 
         log_to_file "Counts: C=${crit} H=${high} M=${med} L=${low} T=${total}"
 
-        # Si 0 vulnerabilidades en primer intento, verificar
-        if [ "$total" = "0" ] && [ $attempt -lt 2 ]; then
+        # Si 0 vulnerabilidades en primer intento, verificar si es legitimo
+        if [ "$total" = "0" ] && [ $attempt -eq 1 ]; then
             local pkg_check
-            pkg_check=$("$PYTHON_CMD" -c "
-import json
-with open('''${report_file}''', encoding='utf-8-sig') as f:
-    raw = f.read().lstrip('\ufeff').replace('\x00', '').strip()
-data = json.loads(raw)
-results = data.get('Results', [])
-pkgs = sum(len(r.get('Packages', [])) for r in results)
-has_v = any('Vulnerabilities' in r for r in results)
-print(f'{len(results)} {pkgs} {has_v}')
-" 2>/dev/null || echo "0 0 False")
+            pkg_check=$(diagnose_json "$report_file")
 
             local num_results num_pkgs has_vulns_key
-            read -r num_results num_pkgs has_vulns_key <<< "$pkg_check"
+            read -r num_results num_pkgs has_vulns_key <<< "${pkg_check:-0 0 False}"
 
-            info "Diagnostico: Results=${num_results}, Packages=${num_pkgs}, HasVulns=${has_vulns_key}"
-            log_to_file "JSON check: Results=${num_results}, Packages=${num_pkgs}, HasVulns=${has_vulns_key}"
+            info "Diagnostico: Results=${num_results:-0}, Packages=${num_pkgs:-0}, HasVulns=${has_vulns_key:-False}"
+            log_to_file "JSON check: Results=${num_results:-0}, Packages=${num_pkgs:-0}, HasVulns=${has_vulns_key:-False}"
 
             if [ "${num_pkgs:-0}" = "0" ]; then
                 warn "0 paquetes detectados. Posible cache corrupto. Reintentando..."
@@ -353,7 +422,7 @@ print(f'{len(results)} {pkgs} {has_v}')
     if [ "$scan_ok" = false ]; then
         fail "No se pudo escanear ${name} despues de 2 intentos."
         warn "Revise: ${LOG_FILE}"
-        echo '{"Results":[]}' > "$report_file"
+        printf '{"Results":[]}\n' > "$report_file"
         crit=0; high=0; med=0; low=0; total=0
     fi
 
@@ -381,18 +450,11 @@ done
 log ""
 log "${Y}[4/4] Generando reporte consolidado...${N}"
 
-export DATA_DIR
-
-"$PYTHON_CMD" << 'PYEOF'
+PY_CONSOLIDATE="${DATA_DIR}/_consolidate_tmp.py"
+cat > "$PY_CONSOLIDATE" << 'PYSCRIPT'
 import json, os, sys
 
-data_dir = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'))
-# Fallback: buscar el directorio
-for candidate in [data_dir, './data', '../data']:
-    summary = os.path.join(candidate, 'scan_summary.jsonl')
-    if os.path.exists(summary):
-        data_dir = candidate
-        break
+data_dir = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DATA_DIR', './data')
 
 summary_file = os.path.join(data_dir, 'scan_summary.jsonl')
 if not os.path.exists(summary_file):
@@ -400,21 +462,22 @@ if not os.path.exists(summary_file):
     sys.exit(0)
 
 services = []
-with open(summary_file, 'r', encoding='utf-8-sig') as f:
-    for line in f:
-        line = line.strip().lstrip('\ufeff').replace('\x00', '')
-        if not line:
-            continue
-        try:
-            services.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+with open(summary_file, 'rb') as f:
+    raw = f.read()
+if raw[:3] == b'\xef\xbb\xbf':
+    raw = raw[3:]
+text = raw.decode('utf-8', errors='ignore')
+
+for line in text.splitlines():
+    line = line.strip()
+    if not line: continue
+    try: services.append(json.loads(line))
+    except: continue
 
 if not services:
     print("  No se encontraron resultados validos.")
     sys.exit(0)
 
-# Tabla
 header = f"  {'Servicio':<16} {'Zona':<22} {'Exposicion':<18} {'CRIT':>5} {'HIGH':>5} {'MED':>5} {'LOW':>5} {'TOTAL':>6}"
 sep    = f"  {'-'*16} {'-'*22} {'-'*18} {'-'*5} {'-'*5} {'-'*5} {'-'*5} {'-'*6}"
 
@@ -431,7 +494,6 @@ print(sep)
 print(f"  {'TOTAL':<16} {'':<22} {'':<18} {tc:>5} {th:>5} {tm:>5} {tl:>5} {tt:>6}")
 print()
 
-# JSON consolidado para el dashboard
 consolidated = {
     "scan_timestamp": services[0].get('timestamp', ''),
     "total_services": len(services),
@@ -445,7 +507,10 @@ with open(out, 'w', encoding='utf-8', newline='\n') as f:
     json.dump(consolidated, f, indent=2, ensure_ascii=False)
 
 print(f"  Reporte consolidado: {out}")
-PYEOF
+PYSCRIPT
+
+"$PYTHON_CMD" "$PY_CONSOLIDATE" "$DATA_DIR"
+rm -f "$PY_CONSOLIDATE" 2>/dev/null || true
 
 log ""
 log "${G}${BOLD}+============================================================+${N}"
