@@ -98,7 +98,7 @@ Todas las imágenes Docker seleccionadas tienen soporte nativo multi-arquitectur
 - 10 GB de espacio en disco
 - Git
 
-### Instalación
+### Instalación (Linux / macOS)
 
 ```bash
 # 1. Clonar el repositorio
@@ -121,6 +121,50 @@ docker compose ps
 # 6. Abrir el dashboard
 # http://localhost:3000
 ```
+
+### Instalación (Windows)
+
+**Requisitos adicionales:** Trivy instalado (`choco install trivy`, `scoop install trivy` o `winget install AquaSecurity.Trivy`) y Python 3.
+
+**Opción A: PowerShell (recomendado en Windows)**
+```powershell
+# 1. Clonar el repositorio
+git clone https://github.com/vtomasv/vulncorp-lab.git
+cd vulncorp-lab
+
+# 2. Levantar el entorno
+docker compose up -d
+
+# 3. Esperar ~2-3 minutos y verificar
+docker compose ps
+
+# 4. Ejecutar el escaneo de vulnerabilidades
+.\scripts\scan.ps1
+
+# 5. Abrir el dashboard
+# http://localhost:3000
+```
+
+**Opción B: Git Bash**
+```bash
+# 1. Clonar el repositorio
+git clone https://github.com/vtomasv/vulncorp-lab.git
+cd vulncorp-lab
+
+# 2. Levantar el entorno
+docker compose up -d
+
+# 3. Esperar ~2-3 minutos y verificar
+docker compose ps
+
+# 4. Ejecutar el escaneo de vulnerabilidades
+bash scripts/scan.sh
+
+# 5. Abrir el dashboard
+# http://localhost:3000
+```
+
+> **Nota sobre Windows:** Si el escaneo muestra problemas, use el script PowerShell (`scan.ps1`) que es nativo de Windows y evita los problemas de conversión de rutas de Git Bash/MINGW. Si el dashboard no carga los datos, visite `http://localhost:3000/api/debug` para diagnosticar.
 
 ### URLs de Acceso
 
@@ -157,7 +201,8 @@ vulncorp-lab/
 │       └── index.html          # Interfaz web del dashboard
 ├── scripts/
 │   ├── setup.sh                # Setup inicial (Trivy + imágenes)
-│   └── scan.sh                 # Escaneo de vulnerabilidades
+│   ├── scan.sh                 # Escaneo de vulnerabilidades (Linux/macOS/Git Bash)
+│   └── scan.ps1                # Escaneo de vulnerabilidades (Windows PowerShell)
 ├── data/                       # Reportes generados (gitignored)
 ├── docs/
 │   ├── LAB_01_STUDENT.md       # Guía del estudiante (Lab 01)
