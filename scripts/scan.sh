@@ -8,20 +8,24 @@
 #  Uso:
 #    ./scripts/scan.sh            # Modo normal
 #    ./scripts/scan.sh --verbose  # Modo verbose (muestra salida completa de Trivy)
+#
+#  Nota Windows: Trivy es un binario nativo de Windows (.exe) y necesita
+#  recibir rutas en formato Windows (C:\Users\...), no en formato POSIX
+#  (/c/Users/...). Este script convierte las rutas automáticamente.
 ###############################################################################
 
 # ─── Configuración de entorno para Windows ───────────────────────────────────
-export MSYS_NO_PATHCONV=1
-export MSYS2_ARG_CONV_EXCL="*"
+# NOTA: NO usamos MSYS_NO_PATHCONV=1 globalmente porque eso rompe otros
+# comandos como mkdir, ls, etc. En su lugar, convertimos las rutas
+# manualmente solo para Trivy.
+# export MSYS_NO_PATHCONV=1
+# export MSYS2_ARG_CONV_EXCL="*"
 
 # ─── Modo verbose ────────────────────────────────────────────────────────────
 VERBOSE=false
 if [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
     VERBOSE=true
 fi
-
-# No usar set -e para poder capturar errores sin que el script aborte
-# set -e
 
 # ─── Detección de plataforma ─────────────────────────────────────────────────
 OS_TYPE="linux"
@@ -41,6 +45,45 @@ case "$(uname -s)" in
         fi
         ;;
 esac
+
+# ─── Conversión de rutas ─────────────────────────────────────────────────────
+# En Windows (Git Bash/MINGW), los comandos de bash usan rutas POSIX como
+# /c/Users/nombre/proyecto/data/reporte.json
+# Pero Trivy es un binario nativo de Windows que necesita rutas como:
+# C:\Users\nombre\proyecto\data\reporte.json
+#
+# Esta función convierte la ruta POSIX a ruta Windows nativa.
+to_native_path() {
+    local path="$1"
+    if [ "$WINDOWS_MODE" = true ]; then
+        # Método 1: Usar cygpath si está disponible (viene con Git Bash)
+        if command -v cygpath &> /dev/null; then
+            cygpath -w "$path"
+            return
+        fi
+        # Método 2: Conversión manual con sed
+        # /c/Users/... → C:\Users\...
+        echo "$path" | sed -e 's|^/\([a-zA-Z]\)/|\1:\\|' -e 's|/|\\|g'
+    else
+        # En Linux/macOS, devolver la ruta tal cual
+        echo "$path"
+    fi
+}
+
+# Función inversa: ruta Windows a POSIX (para que bash pueda leer los archivos)
+to_posix_path() {
+    local path="$1"
+    if [ "$WINDOWS_MODE" = true ]; then
+        if command -v cygpath &> /dev/null; then
+            cygpath -u "$path"
+            return
+        fi
+        # Ya debería ser POSIX en Git Bash, devolver tal cual
+        echo "$path"
+    else
+        echo "$path"
+    fi
+}
 
 # ─── Colores según plataforma ────────────────────────────────────────────────
 supports_color() {
@@ -81,9 +124,16 @@ REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
 LOG_FILE="${REPORT_DIR}/scan.log"
 echo "=== VulnCorp Scan Log - $(date) ===" > "$LOG_FILE"
 echo "Plataforma: ${OS_TYPE}" >> "$LOG_FILE"
-echo "REPORT_DIR: ${REPORT_DIR}" >> "$LOG_FILE"
+echo "WINDOWS_MODE: ${WINDOWS_MODE}" >> "$LOG_FILE"
+echo "REPORT_DIR (POSIX): ${REPORT_DIR}" >> "$LOG_FILE"
+if [ "$WINDOWS_MODE" = true ]; then
+    REPORT_DIR_WIN=$(to_native_path "$REPORT_DIR")
+    echo "REPORT_DIR (Windows): ${REPORT_DIR_WIN}" >> "$LOG_FILE"
+fi
 echo "Trivy: $(trivy --version 2>&1 | head -1)" >> "$LOG_FILE"
 echo "Python: $(python3 --version 2>&1)" >> "$LOG_FILE"
+echo "uname -s: $(uname -s)" >> "$LOG_FILE"
+echo "cygpath disponible: $(command -v cygpath 2>/dev/null || echo 'no')" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 
 # Timestamp para el reporte
@@ -100,6 +150,9 @@ echo -e "${BOLD}${CYAN}+========================================================
 echo ""
 echo -e "  Plataforma detectada: ${CYAN}${OS_TYPE}${NC}"
 echo -e "  Directorio de reportes: ${CYAN}${REPORT_DIR}${NC}"
+if [ "$WINDOWS_MODE" = true ]; then
+    echo -e "  Directorio (Windows):   ${CYAN}${REPORT_DIR_WIN}${NC}"
+fi
 echo -e "  Archivo de log: ${CYAN}${LOG_FILE}${NC}"
 if [ "$VERBOSE" = true ]; then
     echo -e "  Modo: ${YELLOW}VERBOSE (mostrando salida completa de Trivy)${NC}"
@@ -140,11 +193,35 @@ check_trivy() {
         echo -e "${GREEN}[OK] Trivy encontrado: ${trivy_ver}${NC}"
     fi
 
-    # Mostrar ubicación de Trivy y su cache
     local trivy_path
     trivy_path=$(command -v trivy 2>/dev/null || echo "no encontrado")
     echo -e "  Ruta de Trivy: ${trivy_path}"
     echo "Trivy path: ${trivy_path}" >> "$LOG_FILE"
+
+    # Test de escritura: verificar que Trivy puede escribir en el directorio
+    echo -e "  Verificando que Trivy puede escribir en el directorio de reportes..."
+    local test_file="${REPORT_DIR}/_test_write.json"
+    local test_file_native
+    test_file_native=$(to_native_path "$test_file")
+
+    echo "  Test write - POSIX: ${test_file}" >> "$LOG_FILE"
+    echo "  Test write - Native: ${test_file_native}" >> "$LOG_FILE"
+
+    # Intentar un escaneo trivial para verificar escritura
+    local test_output
+    test_output=$(trivy image --format json --output "$test_file_native" --skip-db-update --skip-java-db-update alpine:3.18 2>&1) || true
+
+    if [ -f "$test_file" ]; then
+        echo -e "${GREEN}  [OK] Trivy puede escribir archivos correctamente${NC}"
+        rm -f "$test_file"
+    else
+        # Verificar si Trivy escribió con la ruta nativa pero bash no lo ve
+        echo -e "${YELLOW}  [!] Archivo de prueba no encontrado en ruta POSIX${NC}"
+        echo -e "  Buscando archivos recientes en el directorio..."
+        ls -la "$REPORT_DIR/" 2>&1 | tail -5
+        echo -e "${YELLOW}  Salida de Trivy: ${test_output}${NC}"
+        echo "  Test write FAILED. Trivy output: ${test_output}" >> "$LOG_FILE"
+    fi
 }
 
 # ─── Descargar/Actualizar la base de datos de Trivy ──────────────────────────
@@ -178,7 +255,6 @@ update_trivy_db() {
         echo -e "${YELLOW}    [!] Intento ${attempt}/${db_retries} fallido (exit code: ${db_exit_code})${NC}"
         echo -e "${YELLOW}    Error: ${db_output}${NC}"
 
-        # Limpiar DB corrupta antes de reintentar
         echo -e "    Limpiando DB corrupta..."
         trivy clean --vuln-db 2>&1 | tee -a "$LOG_FILE" || true
         sleep 2
@@ -231,7 +307,6 @@ try:
     print(f"{counts['CRITICAL']} {counts['HIGH']} {counts['MEDIUM']} {counts['LOW']} {total}")
 
 except Exception as e:
-    # Imprimir el error real para diagnóstico
     print(f"ERROR: {e}", file=sys.stderr)
     print(f"0 0 0 0 0")
 PYEOF
@@ -245,8 +320,14 @@ scan_image() {
     local zone="${SERVICE_ZONES[$idx]}"
     local exposure="${SERVICE_EXPOSURE[$idx]}"
     local criticality="${SERVICE_CRITICALITY[$idx]}"
+
+    # Ruta POSIX (para bash: leer archivos, verificar existencia, etc.)
     local report_file="${REPORT_DIR}/${service_name}_trivy.json"
     local error_file="${REPORT_DIR}/${service_name}_error.log"
+
+    # Ruta nativa (para Trivy: escribir el archivo de salida)
+    local report_file_native
+    report_file_native=$(to_native_path "$report_file")
 
     echo ""
     echo -e "${BLUE}------------------------------------------------------------${NC}"
@@ -256,10 +337,15 @@ scan_image() {
     echo -e "  Exposicion: ${exposure}"
     echo -e "  Criticidad: ${criticality}"
     echo -e "  Reporte:    ${report_file}"
+    if [ "$WINDOWS_MODE" = true ]; then
+        echo -e "  Ruta Trivy: ${report_file_native}"
+    fi
     echo -e "${BLUE}------------------------------------------------------------${NC}"
 
     echo "" >> "$LOG_FILE"
     echo "=== Scanning: ${service_name} (${image}) ===" >> "$LOG_FILE"
+    echo "  report_file (POSIX): ${report_file}" >> "$LOG_FILE"
+    echo "  report_file (native): ${report_file_native}" >> "$LOG_FILE"
 
     local scan_ok=false
     local attempt=0
@@ -276,12 +362,16 @@ scan_image() {
 
         echo "  Attempt ${attempt}/${MAX_RETRIES}..." >> "$LOG_FILE"
 
-        # Escanear con --skip-db-update (ya descargamos la DB antes)
-        # Capturar TANTO stdout como stderr para diagnóstico
+        # Eliminar reporte anterior si existe
+        rm -f "$report_file" 2>/dev/null || true
+
+        # ─── ESCANEO ─────────────────────────────────────────────────────
+        # Usamos la ruta NATIVA para --output porque Trivy es un binario
+        # nativo del SO (no un binario MSYS/Cygwin).
         local trivy_output
         trivy_output=$(trivy image \
             --format json \
-            --output "$report_file" \
+            --output "$report_file_native" \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --skip-db-update \
             "$image" 2>&1)
@@ -291,7 +381,6 @@ scan_image() {
         echo "$trivy_output" >> "$LOG_FILE"
         echo "$trivy_output" > "$error_file"
 
-        # Mostrar la salida de Trivy si estamos en modo verbose o si hubo error
         if [ "$VERBOSE" = true ]; then
             echo -e "${CYAN}  --- Salida de Trivy ---${NC}"
             echo "$trivy_output"
@@ -302,20 +391,32 @@ scan_image() {
             echo -e "${RED}  [X] Trivy fallo con codigo de salida: ${trivy_exit_code}${NC}"
             echo -e "${RED}  Error de Trivy:${NC}"
             echo -e "${YELLOW}$(echo "$trivy_output" | tail -10)${NC}"
-            echo -e ""
+            echo ""
             echo -e "  Para ver el error completo:"
             echo -e "    cat ${error_file}"
             continue
         fi
 
-        # Verificar que el archivo existe
+        # ─── VERIFICAR ARCHIVO ───────────────────────────────────────────
+        # El archivo fue escrito por Trivy usando la ruta nativa.
+        # Verificamos con la ruta POSIX (que es lo que bash entiende).
         if [ ! -f "$report_file" ]; then
-            echo -e "${RED}  [X] El archivo de reporte no se genero: ${report_file}${NC}"
-            echo -e "${YELLOW}  Esto puede ser un problema de rutas en Windows.${NC}"
-            echo -e "  Verificando directorio..."
-            ls -la "$REPORT_DIR/" 2>&1 | head -5
-            echo "  Report file not found: ${report_file}" >> "$LOG_FILE"
-            continue
+            echo -e "${YELLOW}  [!] Archivo no encontrado en ruta POSIX: ${report_file}${NC}"
+            echo -e "  Buscando archivos generados en el directorio..."
+            ls -la "$REPORT_DIR/"*trivy* 2>&1 || ls -la "$REPORT_DIR/" 2>&1 | tail -5
+            echo "  Report file not found at POSIX path" >> "$LOG_FILE"
+
+            # En algunos entornos Windows, Trivy puede escribir con una
+            # estructura de ruta diferente. Buscar el archivo.
+            local found_file
+            found_file=$(find "$REPORT_DIR" -name "${service_name}_trivy.json" -type f 2>/dev/null | head -1)
+            if [ -n "$found_file" ]; then
+                echo -e "${GREEN}  [OK] Archivo encontrado en: ${found_file}${NC}"
+                report_file="$found_file"
+            else
+                echo -e "${RED}  [X] No se encontro el archivo de reporte${NC}"
+                continue
+            fi
         fi
 
         # Verificar que no está vacío
@@ -325,32 +426,30 @@ scan_image() {
 
         if [ "$file_size" = "0" ] || [ -z "$file_size" ]; then
             echo -e "${YELLOW}  [!] Reporte vacio (0 bytes) para ${service_name}${NC}"
-            echo "  Report file empty: ${report_file}" >> "$LOG_FILE"
+            echo "  Report file empty" >> "$LOG_FILE"
             continue
         fi
 
         echo -e "  Archivo generado: ${file_size} bytes"
         echo "  Report file size: ${file_size} bytes" >> "$LOG_FILE"
 
-        # Mostrar primeros caracteres del JSON para diagnóstico
         if [ "$VERBOSE" = true ]; then
             echo -e "${CYAN}  Primeros 200 caracteres del JSON:${NC}"
             head -c 200 "$report_file"
             echo ""
         fi
 
-        # Contar vulnerabilidades
+        # ─── CONTAR VULNERABILIDADES ─────────────────────────────────────
         local counts
         counts=$(count_vulns "$report_file" 2>&1)
         local count_stderr
         count_stderr=$(count_vulns "$report_file" 2>&1 1>/dev/null)
 
         if [ -n "$count_stderr" ]; then
-            echo -e "${YELLOW}  [!] Advertencia al contar vulnerabilidades: ${count_stderr}${NC}"
+            echo -e "${YELLOW}  [!] Advertencia al contar: ${count_stderr}${NC}"
             echo "  Count warning: ${count_stderr}" >> "$LOG_FILE"
         fi
 
-        # Extraer los valores (tomar solo la última línea que tiene los números)
         local count_line
         count_line=$(echo "$counts" | grep -E '^[0-9]' | tail -1)
 
@@ -367,7 +466,6 @@ scan_image() {
         low=$(echo "$count_line" | awk '{print $4}')
         total=$(echo "$count_line" | awk '{print $5}')
 
-        # Asegurar que los valores son numéricos
         critical=${critical:-0}
         high=${high:-0}
         medium=${medium:-0}
@@ -376,7 +474,7 @@ scan_image() {
 
         echo "  Counts: C=${critical} H=${high} M=${medium} L=${low} T=${total}" >> "$LOG_FILE"
 
-        # Validar: si total es 0, verificar la estructura del JSON
+        # ─── VALIDAR RESULTADO ───────────────────────────────────────────
         if [ "$total" = "0" ] && [ $attempt -lt $MAX_RETRIES ]; then
             echo -e "${YELLOW}  [!] Se detectaron 0 vulnerabilidades. Verificando estructura del JSON...${NC}"
 
@@ -399,7 +497,6 @@ except Exception as e:
             echo -e "  Diagnostico JSON: ${json_check}"
             echo "  JSON check: ${json_check}" >> "$LOG_FILE"
 
-            # Si no hay key Vulnerabilities pero sí hay Results, puede ser legítimo
             if echo "$json_check" | grep -q "HasVulns: False"; then
                 if echo "$json_check" | grep -q "Packages: 0"; then
                     echo -e "${YELLOW}  [!] Trivy no detecto paquetes. Posible problema de cache. Reintentando...${NC}"
@@ -419,8 +516,8 @@ except Exception as e:
 
     if [ "$scan_ok" = false ]; then
         echo -e "${RED}  [X] No se pudo obtener resultados para ${service_name} despues de ${MAX_RETRIES} intentos${NC}"
-        echo -e "${YELLOW}  Revise el log para mas detalles: ${LOG_FILE}${NC}"
-        echo -e "${YELLOW}  Revise el error de Trivy: ${error_file}${NC}"
+        echo -e "${YELLOW}  Revise el log: ${LOG_FILE}${NC}"
+        echo -e "${YELLOW}  Revise el error: ${error_file}${NC}"
         echo '{"Results":[]}' > "$report_file"
         critical=0; high=0; medium=0; low=0; total=0
     fi
@@ -474,7 +571,6 @@ if not services:
     print("  No se encontraron resultados validos.")
     sys.exit(0)
 
-# Tabla de resumen
 header = f"  {'Servicio':<16} {'Zona':<22} {'Exposicion':<18} {'CRIT':>5} {'HIGH':>5} {'MED':>5} {'LOW':>5} {'TOTAL':>6}"
 separator = f"  {'-'*16} {'-'*22} {'-'*18} {'-'*5} {'-'*5} {'-'*5} {'-'*5} {'-'*6}"
 
@@ -494,7 +590,6 @@ print(separator)
 print(f"  {'TOTAL':<16} {'':<22} {'':<18} {total_c:>5} {total_h:>5} {total_m:>5} {total_l:>5} {total_t:>6}")
 print()
 
-# Generar JSON consolidado para el dashboard
 consolidated = {
     "scan_timestamp": services[0]['timestamp'] if services else "",
     "total_services": len(services),
