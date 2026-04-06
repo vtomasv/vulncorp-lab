@@ -3,29 +3,25 @@
 #  VulnCorp Lab — Script de Escaneo de Vulnerabilidades con Trivy
 #  Curso: Gestión de Vulnerabilidades con Enfoque MITRE — 2026
 #
-#  Este script escanea todas las imágenes del laboratorio y genera reportes
-#  en formato JSON que alimentan el dashboard de vulnerabilidades.
+#  Compatible con: Linux, macOS (Intel/ARM), Windows (Git Bash, MINGW, WSL2)
 #
-#  Compatible con:
-#    - Linux (AMD64 / ARM64)
-#    - macOS (Intel / Apple Silicon M1/M2/M3/M4)
-#    - Windows (Git Bash, MINGW, WSL2, PowerShell via bash)
-#
-#  Problemas conocidos resueltos:
-#    - MINGW path mangling en Windows (MSYS_NO_PATHCONV)
-#    - Trivy DB corruption al re-descargar (separar DB download del scan)
-#    - BOM UTF-8 en archivos generados en Windows
-#    - Trivy scan cache corrupto (limpieza automática)
+#  Uso:
+#    ./scripts/scan.sh            # Modo normal
+#    ./scripts/scan.sh --verbose  # Modo verbose (muestra salida completa de Trivy)
 ###############################################################################
 
 # ─── Configuración de entorno para Windows ───────────────────────────────────
-# MINGW/Git Bash en Windows convierte automáticamente rutas Unix a Windows,
-# lo que rompe argumentos como --output /ruta/archivo.json.
-# MSYS_NO_PATHCONV=1 desactiva esta conversión.
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
-set -e
+# ─── Modo verbose ────────────────────────────────────────────────────────────
+VERBOSE=false
+if [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
+    VERBOSE=true
+fi
+
+# No usar set -e para poder capturar errores sin que el script aborte
+# set -e
 
 # ─── Detección de plataforma ─────────────────────────────────────────────────
 OS_TYPE="linux"
@@ -81,6 +77,15 @@ REPORT_DIR="${SCRIPT_DIR}/../data"
 mkdir -p "$REPORT_DIR"
 REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
 
+# Archivo de log para diagnóstico
+LOG_FILE="${REPORT_DIR}/scan.log"
+echo "=== VulnCorp Scan Log - $(date) ===" > "$LOG_FILE"
+echo "Plataforma: ${OS_TYPE}" >> "$LOG_FILE"
+echo "REPORT_DIR: ${REPORT_DIR}" >> "$LOG_FILE"
+echo "Trivy: $(trivy --version 2>&1 | head -1)" >> "$LOG_FILE"
+echo "Python: $(python3 --version 2>&1)" >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+
 # Timestamp para el reporte
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
@@ -95,6 +100,10 @@ echo -e "${BOLD}${CYAN}+========================================================
 echo ""
 echo -e "  Plataforma detectada: ${CYAN}${OS_TYPE}${NC}"
 echo -e "  Directorio de reportes: ${CYAN}${REPORT_DIR}${NC}"
+echo -e "  Archivo de log: ${CYAN}${LOG_FILE}${NC}"
+if [ "$VERBOSE" = true ]; then
+    echo -e "  Modo: ${YELLOW}VERBOSE (mostrando salida completa de Trivy)${NC}"
+fi
 echo ""
 
 # Lista de imágenes a escanear
@@ -126,39 +135,59 @@ check_trivy() {
         fi
         echo -e "${GREEN}[OK] Trivy instalado correctamente${NC}"
     else
-        echo -e "${GREEN}[OK] Trivy encontrado: $(trivy --version 2>/dev/null | head -1)${NC}"
+        local trivy_ver
+        trivy_ver=$(trivy --version 2>&1 | head -1)
+        echo -e "${GREEN}[OK] Trivy encontrado: ${trivy_ver}${NC}"
     fi
+
+    # Mostrar ubicación de Trivy y su cache
+    local trivy_path
+    trivy_path=$(command -v trivy 2>/dev/null || echo "no encontrado")
+    echo -e "  Ruta de Trivy: ${trivy_path}"
+    echo "Trivy path: ${trivy_path}" >> "$LOG_FILE"
 }
 
 # ─── Descargar/Actualizar la base de datos de Trivy ──────────────────────────
-# IMPORTANTE: Separamos la descarga de la DB del escaneo.
-# En Windows, si Trivy descarga la DB durante el escaneo y la descarga se
-# interrumpe o corrompe, el escaneo reporta 0 vulnerabilidades silenciosamente.
-# Ref: https://github.com/aquasecurity/trivy/discussions/7758
 update_trivy_db() {
     echo -e "${YELLOW}[i] Descargando/actualizando base de datos de vulnerabilidades...${NC}"
     echo -e "    (Esto puede tomar unos minutos la primera vez)"
 
     # Limpiar scan cache para evitar resultados obsoletos
-    trivy clean --scan-cache 2>/dev/null || true
+    echo -e "  Limpiando scan cache..."
+    trivy clean --scan-cache 2>&1 | tee -a "$LOG_FILE" || true
 
     # Descargar la DB de vulnerabilidades
     local db_retries=3
     local db_ok=false
     for attempt in $(seq 1 $db_retries); do
-        if trivy image --download-db-only 2>/dev/null; then
+        echo "" >> "$LOG_FILE"
+        echo "=== DB Download attempt ${attempt}/${db_retries} ===" >> "$LOG_FILE"
+
+        local db_output
+        db_output=$(trivy image --download-db-only 2>&1)
+        local db_exit_code=$?
+
+        echo "$db_output" >> "$LOG_FILE"
+
+        if [ $db_exit_code -eq 0 ]; then
             db_ok=true
+            echo -e "${GREEN}  [OK] Base de datos descargada correctamente${NC}"
             break
         fi
-        echo -e "${YELLOW}    [!] Intento ${attempt}/${db_retries} de descarga de DB fallido. Reintentando...${NC}"
+
+        echo -e "${YELLOW}    [!] Intento ${attempt}/${db_retries} fallido (exit code: ${db_exit_code})${NC}"
+        echo -e "${YELLOW}    Error: ${db_output}${NC}"
+
         # Limpiar DB corrupta antes de reintentar
-        trivy clean --vuln-db 2>/dev/null || true
+        echo -e "    Limpiando DB corrupta..."
+        trivy clean --vuln-db 2>&1 | tee -a "$LOG_FILE" || true
         sleep 2
     done
 
     if [ "$db_ok" = false ]; then
-        echo -e "${RED}[X] No se pudo descargar la base de datos de Trivy.${NC}"
-        echo -e "${RED}    Verifique su conexion a Internet e intente de nuevo.${NC}"
+        echo -e "${RED}[X] No se pudo descargar la base de datos de Trivy despues de ${db_retries} intentos.${NC}"
+        echo -e "${RED}    Verifique su conexion a Internet.${NC}"
+        echo -e "${RED}    Revise el log: ${LOG_FILE}${NC}"
         exit 1
     fi
 
@@ -202,7 +231,8 @@ try:
     print(f"{counts['CRITICAL']} {counts['HIGH']} {counts['MEDIUM']} {counts['LOW']} {total}")
 
 except Exception as e:
-    print(f"0 0 0 0 0", file=sys.stderr)
+    # Imprimir el error real para diagnóstico
+    print(f"ERROR: {e}", file=sys.stderr)
     print(f"0 0 0 0 0")
 PYEOF
 }
@@ -216,6 +246,7 @@ scan_image() {
     local exposure="${SERVICE_EXPOSURE[$idx]}"
     local criticality="${SERVICE_CRITICALITY[$idx]}"
     local report_file="${REPORT_DIR}/${service_name}_trivy.json"
+    local error_file="${REPORT_DIR}/${service_name}_error.log"
 
     echo ""
     echo -e "${BLUE}------------------------------------------------------------${NC}"
@@ -224,70 +255,161 @@ scan_image() {
     echo -e "  Zona:       ${zone}"
     echo -e "  Exposicion: ${exposure}"
     echo -e "  Criticidad: ${criticality}"
+    echo -e "  Reporte:    ${report_file}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
+
+    echo "" >> "$LOG_FILE"
+    echo "=== Scanning: ${service_name} (${image}) ===" >> "$LOG_FILE"
 
     local scan_ok=false
     local attempt=0
+    local critical=0 high=0 medium=0 low=0 total=0
 
     while [ $attempt -lt $MAX_RETRIES ] && [ "$scan_ok" = false ]; do
         attempt=$((attempt + 1))
 
         if [ $attempt -gt 1 ]; then
             echo -e "${YELLOW}    [!] Reintento ${attempt}/${MAX_RETRIES} - Limpiando cache de escaneo...${NC}"
-            trivy clean --scan-cache 2>/dev/null || true
+            trivy clean --scan-cache 2>&1 | tee -a "$LOG_FILE" || true
             sleep 1
         fi
 
+        echo "  Attempt ${attempt}/${MAX_RETRIES}..." >> "$LOG_FILE"
+
         # Escanear con --skip-db-update (ya descargamos la DB antes)
-        trivy image \
+        # Capturar TANTO stdout como stderr para diagnóstico
+        local trivy_output
+        trivy_output=$(trivy image \
             --format json \
             --output "$report_file" \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --skip-db-update \
-            --quiet \
-            "$image" 2>/dev/null || {
-                echo -e "${RED}[X] Error escaneando ${image}${NC}"
-                continue
-            }
+            "$image" 2>&1)
+        local trivy_exit_code=$?
 
-        # Verificar que el archivo existe y no está vacío
-        if [ ! -s "$report_file" ]; then
-            echo -e "${YELLOW}    [!] Reporte vacio para ${service_name}${NC}"
+        # Guardar la salida de Trivy en el log
+        echo "$trivy_output" >> "$LOG_FILE"
+        echo "$trivy_output" > "$error_file"
+
+        # Mostrar la salida de Trivy si estamos en modo verbose o si hubo error
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${CYAN}  --- Salida de Trivy ---${NC}"
+            echo "$trivy_output"
+            echo -e "${CYAN}  --- Fin salida Trivy ---${NC}"
+        fi
+
+        if [ $trivy_exit_code -ne 0 ]; then
+            echo -e "${RED}  [X] Trivy fallo con codigo de salida: ${trivy_exit_code}${NC}"
+            echo -e "${RED}  Error de Trivy:${NC}"
+            echo -e "${YELLOW}$(echo "$trivy_output" | tail -10)${NC}"
+            echo -e ""
+            echo -e "  Para ver el error completo:"
+            echo -e "    cat ${error_file}"
             continue
+        fi
+
+        # Verificar que el archivo existe
+        if [ ! -f "$report_file" ]; then
+            echo -e "${RED}  [X] El archivo de reporte no se genero: ${report_file}${NC}"
+            echo -e "${YELLOW}  Esto puede ser un problema de rutas en Windows.${NC}"
+            echo -e "  Verificando directorio..."
+            ls -la "$REPORT_DIR/" 2>&1 | head -5
+            echo "  Report file not found: ${report_file}" >> "$LOG_FILE"
+            continue
+        fi
+
+        # Verificar que no está vacío
+        local file_size
+        file_size=$(wc -c < "$report_file" 2>/dev/null || echo "0")
+        file_size=$(echo "$file_size" | tr -d ' ')
+
+        if [ "$file_size" = "0" ] || [ -z "$file_size" ]; then
+            echo -e "${YELLOW}  [!] Reporte vacio (0 bytes) para ${service_name}${NC}"
+            echo "  Report file empty: ${report_file}" >> "$LOG_FILE"
+            continue
+        fi
+
+        echo -e "  Archivo generado: ${file_size} bytes"
+        echo "  Report file size: ${file_size} bytes" >> "$LOG_FILE"
+
+        # Mostrar primeros caracteres del JSON para diagnóstico
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${CYAN}  Primeros 200 caracteres del JSON:${NC}"
+            head -c 200 "$report_file"
+            echo ""
         fi
 
         # Contar vulnerabilidades
         local counts
-        counts=$(count_vulns "$report_file")
+        counts=$(count_vulns "$report_file" 2>&1)
+        local count_stderr
+        count_stderr=$(count_vulns "$report_file" 2>&1 1>/dev/null)
 
-        local critical high medium low total
-        critical=$(echo "$counts" | awk '{print $1}')
-        high=$(echo "$counts" | awk '{print $2}')
-        medium=$(echo "$counts" | awk '{print $3}')
-        low=$(echo "$counts" | awk '{print $4}')
-        total=$(echo "$counts" | awk '{print $5}')
+        if [ -n "$count_stderr" ]; then
+            echo -e "${YELLOW}  [!] Advertencia al contar vulnerabilidades: ${count_stderr}${NC}"
+            echo "  Count warning: ${count_stderr}" >> "$LOG_FILE"
+        fi
 
-        # Validar: si total es 0 y no es la primera vez, reintentar
-        # (algunas imágenes como alpine-ftp pueden tener legítimamente 0)
+        # Extraer los valores (tomar solo la última línea que tiene los números)
+        local count_line
+        count_line=$(echo "$counts" | grep -E '^[0-9]' | tail -1)
+
+        if [ -z "$count_line" ]; then
+            echo -e "${RED}  [X] No se pudieron contar las vulnerabilidades${NC}"
+            echo -e "  Salida del contador: '${counts}'"
+            echo "  Count output: '${counts}'" >> "$LOG_FILE"
+            continue
+        fi
+
+        critical=$(echo "$count_line" | awk '{print $1}')
+        high=$(echo "$count_line" | awk '{print $2}')
+        medium=$(echo "$count_line" | awk '{print $3}')
+        low=$(echo "$count_line" | awk '{print $4}')
+        total=$(echo "$count_line" | awk '{print $5}')
+
+        # Asegurar que los valores son numéricos
+        critical=${critical:-0}
+        high=${high:-0}
+        medium=${medium:-0}
+        low=${low:-0}
+        total=${total:-0}
+
+        echo "  Counts: C=${critical} H=${high} M=${medium} L=${low} T=${total}" >> "$LOG_FILE"
+
+        # Validar: si total es 0, verificar la estructura del JSON
         if [ "$total" = "0" ] && [ $attempt -lt $MAX_RETRIES ]; then
-            echo -e "${YELLOW}    [!] Se detectaron 0 vulnerabilidades. Verificando...${NC}"
+            echo -e "${YELLOW}  [!] Se detectaron 0 vulnerabilidades. Verificando estructura del JSON...${NC}"
 
-            # Verificar si el JSON tiene la estructura correcta
-            local has_results
-            has_results=$(python3 -c "
-import json
+            local json_check
+            json_check=$(python3 -c "
+import json, sys
 try:
     with open(r'''$report_file''', encoding='utf-8-sig') as f:
-        data = json.loads(f.read().lstrip('\ufeff'))
+        content = f.read().lstrip('\ufeff').replace('\x00', '')
+    data = json.loads(content)
     results = data.get('Results', [])
-    has_vulns_key = any('Vulnerabilities' in r for r in results)
-    print('yes' if has_vulns_key else 'no')
-except:
-    print('error')
-" 2>/dev/null || echo "error")
+    num_results = len(results)
+    has_vulns = any('Vulnerabilities' in r for r in results)
+    total_pkgs = sum(len(r.get('Packages', [])) for r in results)
+    print(f'Results: {num_results}, HasVulns: {has_vulns}, Packages: {total_pkgs}')
+except Exception as e:
+    print(f'ERROR: {e}')
+" 2>&1)
 
-            if [ "$has_results" = "no" ] || [ "$has_results" = "error" ]; then
-                echo -e "${YELLOW}    [!] El JSON no contiene datos de vulnerabilidades. Reintentando...${NC}"
+            echo -e "  Diagnostico JSON: ${json_check}"
+            echo "  JSON check: ${json_check}" >> "$LOG_FILE"
+
+            # Si no hay key Vulnerabilities pero sí hay Results, puede ser legítimo
+            if echo "$json_check" | grep -q "HasVulns: False"; then
+                if echo "$json_check" | grep -q "Packages: 0"; then
+                    echo -e "${YELLOW}  [!] Trivy no detecto paquetes. Posible problema de cache. Reintentando...${NC}"
+                    continue
+                else
+                    echo -e "${YELLOW}  [i] Trivy detecto paquetes pero no vulnerabilidades. Puede ser legitimo.${NC}"
+                fi
+            fi
+            if echo "$json_check" | grep -q "ERROR"; then
+                echo -e "${RED}  [X] Error al analizar el JSON. Reintentando...${NC}"
                 continue
             fi
         fi
@@ -296,10 +418,16 @@ except:
     done
 
     if [ "$scan_ok" = false ]; then
-        echo -e "${RED}[X] No se pudo obtener resultados para ${service_name} despues de ${MAX_RETRIES} intentos${NC}"
-        # Crear un reporte vacío para no romper el flujo
+        echo -e "${RED}  [X] No se pudo obtener resultados para ${service_name} despues de ${MAX_RETRIES} intentos${NC}"
+        echo -e "${YELLOW}  Revise el log para mas detalles: ${LOG_FILE}${NC}"
+        echo -e "${YELLOW}  Revise el error de Trivy: ${error_file}${NC}"
         echo '{"Results":[]}' > "$report_file"
-        local critical=0 high=0 medium=0 low=0 total=0
+        critical=0; high=0; medium=0; low=0; total=0
+    fi
+
+    # Limpiar archivo de error si el scan fue exitoso
+    if [ "$scan_ok" = true ] && [ -f "$error_file" ]; then
+        rm -f "$error_file"
     fi
 
     echo ""
@@ -335,7 +463,6 @@ with open(summary_file, 'r', encoding='utf-8-sig') as f:
     for line in f:
         line = line.strip()
         if line:
-            # Eliminar BOM si existe en la línea
             if line and ord(line[0]) == 0xFEFF:
                 line = line[1:]
             try:
@@ -405,6 +532,7 @@ echo -e "${YELLOW}[3/4] Escaneando imagenes del laboratorio VulnCorp...${NC}"
 
 # Limpiar resumen anterior
 rm -f "${REPORT_DIR}/scan_summary.jsonl"
+rm -f "${REPORT_DIR}"/*_error.log
 
 # Escanear cada imagen
 for i in "${!SERVICE_NAMES[@]}"; do
@@ -419,4 +547,8 @@ generate_consolidated_report
 echo ""
 echo -e "${GREEN}${BOLD}[OK] Escaneo completado. Los reportes estan en: ${REPORT_DIR}/${NC}"
 echo -e "${CYAN}     Abra el dashboard en: http://localhost:3000${NC}"
+echo -e "${CYAN}     Log de diagnostico: ${LOG_FILE}${NC}"
+echo ""
+echo -e "  Si hay problemas, ejecute con modo verbose para mas detalles:"
+echo -e "    ${BOLD}./scripts/scan.sh --verbose${NC}"
 echo ""
