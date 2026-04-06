@@ -58,7 +58,7 @@ cd vulncorp-lab
 docker compose ps
 ```
 
-### Instalación y ejecución
+### Instalación y ejecución (Linux / macOS)
 
 ```bash
 # 1. Entrar al directorio del Lab 02
@@ -78,6 +78,31 @@ cd lab02-pipeline
 # 6. Subir resultados a las plataformas
 python3 scripts/upload_reports.py
 ```
+
+### Instalación y ejecución (Windows PowerShell)
+
+**Requisitos:** Syft y Grype instalados (`scoop install syft grype` o `choco install syft grype`) y Python 3.
+
+```powershell
+# 1. Entrar al directorio del Lab 02
+cd lab02-pipeline
+
+# 2. Levantar plataformas
+docker compose up -d
+
+# 3. Esperar 3-5 minutos a que las plataformas inicialicen
+
+# 4. Generar SBOMs de la infraestructura del Lab 01
+.\scripts\generate_sbom.ps1
+
+# 5. Escanear vulnerabilidades con Grype
+.\scripts\scan_grype.ps1
+
+# 6. Subir resultados a las plataformas
+python scripts\upload_reports.py
+```
+
+> **Nota Windows:** Los scripts `.ps1` usan `cmd /c` internamente para la redirección de archivos, evitando problemas de codificación BOM/UTF-16 de PowerShell. Si Git Bash presenta problemas de rutas, use siempre los scripts `.ps1`.
 
 ### URLs de Acceso
 
@@ -102,8 +127,10 @@ lab02-pipeline/
 ├── README.md                   # Este archivo
 ├── scripts/
 │   ├── setup_lab02.sh          # Setup inicial (instala herramientas + levanta plataformas)
-│   ├── generate_sbom.sh        # Genera SBOMs con Syft (CycloneDX)
-│   ├── scan_grype.sh           # Escanea vulnerabilidades con Grype
+│   ├── generate_sbom.sh        # Genera SBOMs con Syft (Linux/macOS/Git Bash)
+│   ├── generate_sbom.ps1       # Genera SBOMs con Syft (Windows PowerShell)
+│   ├── scan_grype.sh           # Escanea vulnerabilidades con Grype (Linux/macOS/Git Bash)
+│   ├── scan_grype.ps1          # Escanea vulnerabilidades con Grype (Windows PowerShell)
 │   └── upload_reports.py       # Sube resultados a DTrack y DefectDojo
 ├── data/
 │   ├── sbom/                   # SBOMs generados por Syft

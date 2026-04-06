@@ -1,21 +1,21 @@
 /**
- * VulnCorp — Dashboard de Gestión de Vulnerabilidades
- * Curso: Gestión de Vulnerabilidades con Enfoque MITRE — 2026
+ * VulnCorp Dashboard de Gestion de Vulnerabilidades
+ * Curso: Gestion de Vulnerabilidades con Enfoque MITRE 2026
  *
  * Servidor Express que sirve el dashboard y la API de datos.
- * Compatible con Linux, macOS y Windows (Docker Desktop).
  *
- * NOTA: El dashboard corre DENTRO de un contenedor Docker (Linux),
+ * NOTA SOBRE COMPATIBILIDAD WINDOWS:
+ * El dashboard corre DENTRO de un contenedor Docker (Linux),
  * pero los archivos JSON son generados FUERA del contenedor por
- * scan.sh (que puede correr en Windows). Los archivos llegan al
- * contenedor via bind-mount (./data:/app/data).
+ * scan.sh o scan.ps1 (que pueden correr en Windows). Los archivos
+ * llegan al contenedor via bind-mount (./data:/app/data).
  *
- * Problemas conocidos en Windows que este codigo maneja:
- * 1. BOM (Byte Order Mark) al inicio de archivos UTF-8
- * 2. Line endings CRLF en lugar de LF
- * 3. Caracteres nulos intercalados
- * 4. Latencia en bind-mounts de Docker Desktop (archivos tardan
- *    en aparecer dentro del contenedor)
+ * Problemas de Windows que este codigo maneja:
+ * 1. BOM UTF-8 (EF BB BF) al inicio de archivos
+ * 2. BOM UTF-16 LE (FF FE) si PowerShell uso Set-Content -Encoding Unicode
+ * 3. Line endings CRLF en lugar de LF
+ * 4. Caracteres nulos intercalados (UTF-16 mal decodificado)
+ * 5. Latencia en bind-mounts de Docker Desktop para Windows
  */
 
 const express = require('express');
@@ -26,7 +26,7 @@ const path = require('path');
 const app = express();
 const PORT = 3000;
 
-// ─── Directorio de datos ────────────────────────────────────────────────────
+// Directorio de datos
 const DATA_DIR = fs.existsSync('/app/data')
     ? '/app/data'
     : path.join(__dirname, '..', 'data');
@@ -40,26 +40,41 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Utilidades robustas para lectura de archivos ──────────────────────────
+// =====================================================================
+//  Utilidades robustas para lectura de archivos
+// =====================================================================
 
 /**
- * Lee un archivo y devuelve su contenido como string limpio.
- * Maneja BOM, CRLF, caracteres nulos y errores de codificacion.
+ * Lee un archivo como buffer raw y lo convierte a string UTF-8 limpio.
+ * Maneja: BOM UTF-8, BOM UTF-16LE, CRLF, caracteres nulos.
  */
 function readFileSafe(filePath) {
     try {
-        // Leer como buffer primero para detectar BOM
         const buf = fs.readFileSync(filePath);
 
-        // Detectar y eliminar BOM UTF-8 (EF BB BF)
-        let start = 0;
-        if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
-            start = 3;
+        if (buf.length === 0) {
+            console.warn(`[VulnCorp] Archivo vacio: ${filePath}`);
+            return null;
         }
 
-        let content = buf.slice(start).toString('utf8');
+        let content;
 
-        // Eliminar BOM como caracter Unicode (por si acaso)
+        // Detectar BOM UTF-16 LE (FF FE) - PowerShell a veces genera esto
+        if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
+            console.log(`[VulnCorp] BOM UTF-16LE detectado en: ${path.basename(filePath)}`);
+            // Decodificar como UTF-16LE, saltando el BOM
+            content = buf.slice(2).toString('utf16le');
+        }
+        // Detectar BOM UTF-8 (EF BB BF)
+        else if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+            console.log(`[VulnCorp] BOM UTF-8 detectado en: ${path.basename(filePath)}`);
+            content = buf.slice(3).toString('utf8');
+        }
+        else {
+            content = buf.toString('utf8');
+        }
+
+        // Eliminar BOM Unicode residual (por si acaso)
         if (content.charCodeAt(0) === 0xFEFF) {
             content = content.substring(1);
         }
@@ -67,7 +82,7 @@ function readFileSafe(filePath) {
         // Normalizar line endings
         content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-        // Eliminar caracteres nulos
+        // Eliminar caracteres nulos (comun en archivos UTF-16 mal convertidos)
         content = content.replace(/\0/g, '');
 
         return content.trim();
@@ -87,13 +102,16 @@ function readJsonSafe(filePath) {
     try {
         return JSON.parse(content);
     } catch (err) {
-        console.error(`[VulnCorp] Error parseando JSON ${filePath}: ${err.message}`);
-        // Diagnostico: mostrar primeros bytes
+        console.error(`[VulnCorp] Error parseando JSON ${path.basename(filePath)}: ${err.message}`);
+        // Diagnostico: mostrar primeros bytes en hex
         try {
             const buf = fs.readFileSync(filePath);
-            const hex = buf.slice(0, 30).toString('hex').match(/.{2}/g).join(' ');
-            console.error(`[VulnCorp] Primeros 30 bytes (hex): ${hex}`);
-            console.error(`[VulnCorp] Primeros 100 chars: ${buf.slice(0, 100).toString('utf8')}`);
+            const hex = [];
+            for (let i = 0; i < Math.min(30, buf.length); i++) {
+                hex.push(buf[i].toString(16).padStart(2, '0'));
+            }
+            console.error(`[VulnCorp] Primeros 30 bytes (hex): ${hex.join(' ')}`);
+            console.error(`[VulnCorp] Primeros 100 chars: ${content.substring(0, 100)}`);
         } catch (e) { /* ignorar */ }
         return null;
     }
@@ -134,12 +152,24 @@ function listDataFiles(suffix) {
 }
 
 /**
- * Construye el reporte consolidado desde archivos individuales de Trivy.
- * Usa scan_summary.jsonl si existe (tiene metadatos de zona/exposicion),
- * si no, construye desde los archivos _trivy.json.
+ * Construye el reporte consolidado desde multiples fuentes.
+ * Orden de prioridad:
+ *   1. consolidated_report.json (pre-generado por scan.sh/scan.ps1)
+ *   2. scan_summary.jsonl (resumen por servicio)
+ *   3. Archivos _trivy.json individuales (fallback)
  */
 function buildConsolidatedReport() {
-    // Opcion 1: Leer scan_summary.jsonl (generado por scan.sh, tiene metadatos)
+    // Opcion 1: Reporte consolidado pre-generado
+    const consolidatedPath = path.join(DATA_DIR, 'consolidated_report.json');
+    if (fs.existsSync(consolidatedPath)) {
+        const data = readJsonSafe(consolidatedPath);
+        if (data && data.services && data.services.length > 0) {
+            data.source = 'consolidated_report.json';
+            return data;
+        }
+    }
+
+    // Opcion 2: Leer scan_summary.jsonl
     const summaryPath = path.join(DATA_DIR, 'scan_summary.jsonl');
     if (fs.existsSync(summaryPath)) {
         const services = readJsonlSafe(summaryPath);
@@ -162,7 +192,7 @@ function buildConsolidatedReport() {
         }
     }
 
-    // Opcion 2: Construir desde archivos _trivy.json individuales
+    // Opcion 3: Construir desde archivos _trivy.json individuales
     const trivyFiles = listDataFiles('_trivy.json');
     if (trivyFiles.length === 0) return null;
 
@@ -200,6 +230,8 @@ function buildConsolidatedReport() {
         tc += critical; th += high; tm += medium; tl += low;
     });
 
+    if (services.length === 0) return null;
+
     return {
         scan_timestamp: new Date().toISOString(),
         total_services: services.length,
@@ -210,34 +242,26 @@ function buildConsolidatedReport() {
     };
 }
 
-// ─── API: Reporte consolidado ───────────────────────────────────────────────
-app.get('/api/report', (req, res) => {
-    // Primero intentar leer el reporte consolidado pre-generado
-    const reportPath = path.join(DATA_DIR, 'consolidated_report.json');
-    if (fs.existsSync(reportPath)) {
-        const data = readJsonSafe(reportPath);
-        if (data) {
-            data.source = 'consolidated_report.json';
-            return res.json(data);
-        }
-    }
+// =====================================================================
+//  API Endpoints
+// =====================================================================
 
-    // Si no existe, construirlo dinamicamente
+// --- Reporte consolidado ---
+app.get('/api/report', (req, res) => {
     const report = buildConsolidatedReport();
     if (report) return res.json(report);
 
-    // Sin datos
     res.json({
         scan_timestamp: null,
         total_services: 0,
         total_vulnerabilities: 0,
         by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
         services: [],
-        message: "No se han ejecutado escaneos. Ejecute: ./scripts/scan.sh"
+        message: "No se han ejecutado escaneos. Ejecute: ./scripts/scan.sh (Linux/macOS) o .\\scripts\\scan.ps1 (Windows)"
     });
 });
 
-// ─── API: Detalle de un servicio ────────────────────────────────────────────
+// --- Detalle de un servicio ---
 app.get('/api/service/:name', (req, res) => {
     const serviceName = req.params.name;
     const reportPath = path.join(DATA_DIR, `${serviceName}_trivy.json`);
@@ -250,14 +274,14 @@ app.get('/api/service/:name', (req, res) => {
     res.status(404).json({ error: `Reporte no encontrado: ${serviceName}` });
 });
 
-// ─── API: Listar servicios disponibles ──────────────────────────────────────
+// --- Listar servicios disponibles ---
 app.get('/api/services', (req, res) => {
     const files = listDataFiles('_trivy.json');
     const services = files.map(f => f.replace('_trivy.json', ''));
     res.json(services);
 });
 
-// ─── API: Vulnerabilidades con filtros ──────────────────────────────────────
+// --- Vulnerabilidades con filtros ---
 app.get('/api/vulnerabilities', (req, res) => {
     const { severity, service, fixable } = req.query;
     const files = listDataFiles('_trivy.json');
@@ -302,7 +326,7 @@ app.get('/api/vulnerabilities', (req, res) => {
     res.json(allVulns);
 });
 
-// ─── API: Guardar decisiones del estudiante ─────────────────────────────────
+// --- Guardar decisiones del estudiante ---
 app.post('/api/decisions', (req, res) => {
     const decisionsPath = path.join(DATA_DIR, 'student_decisions.json');
     let decisions = [];
@@ -311,11 +335,13 @@ app.post('/api/decisions', (req, res) => {
         if (data && Array.isArray(data)) decisions = data;
     }
     decisions.push({ ...req.body, timestamp: new Date().toISOString() });
-    fs.writeFileSync(decisionsPath, JSON.stringify(decisions, null, 2) + '\n', 'utf8');
+    // Escribir sin BOM usando Buffer
+    const jsonStr = JSON.stringify(decisions, null, 2) + '\n';
+    fs.writeFileSync(decisionsPath, Buffer.from(jsonStr, 'utf8'));
     res.json({ success: true, total_decisions: decisions.length });
 });
 
-// ─── API: Obtener decisiones guardadas ──────────────────────────────────────
+// --- Obtener decisiones guardadas ---
 app.get('/api/decisions', (req, res) => {
     const decisionsPath = path.join(DATA_DIR, 'student_decisions.json');
     if (fs.existsSync(decisionsPath)) {
@@ -325,7 +351,18 @@ app.get('/api/decisions', (req, res) => {
     res.json([]);
 });
 
-// ─── API: Diagnostico ──────────────────────────────────────────────────────
+// --- Forzar recarga de datos ---
+app.post('/api/reload', (req, res) => {
+    console.log('[VulnCorp] Recarga forzada solicitada');
+    const report = buildConsolidatedReport();
+    if (report) {
+        res.json({ success: true, message: 'Datos recargados', report });
+    } else {
+        res.json({ success: false, message: 'No se encontraron datos de escaneo' });
+    }
+});
+
+// --- Diagnostico ---
 app.get('/api/debug', (req, res) => {
     const info = {
         data_dir: DATA_DIR,
@@ -349,12 +386,27 @@ app.get('/api/debug', (req, res) => {
                         modified: stats.mtime.toISOString(),
                         is_file: stats.isFile()
                     };
-                    // Para archivos JSON, intentar parsear y reportar estado
-                    if (f.endsWith('.json') && stats.isFile() && stats.size > 0) {
-                        const data = readJsonSafe(fp);
-                        result.json_valid = data !== null;
-                        if (data && data.Results) {
-                            result.results_count = data.Results.length;
+                    if (stats.isFile() && stats.size > 0) {
+                        // Detectar encoding
+                        const buf = fs.readFileSync(fp);
+                        const b0 = buf[0], b1 = buf.length > 1 ? buf[1] : 0, b2 = buf.length > 2 ? buf[2] : 0;
+                        if (b0 === 0xEF && b1 === 0xBB && b2 === 0xBF) {
+                            result.encoding = 'UTF-8 with BOM';
+                        } else if (b0 === 0xFF && b1 === 0xFE) {
+                            result.encoding = 'UTF-16LE with BOM';
+                        } else {
+                            result.encoding = 'UTF-8 (no BOM)';
+                        }
+
+                        // Intentar parsear JSON
+                        if (f.endsWith('.json') || f.endsWith('.jsonl')) {
+                            const data = f.endsWith('.jsonl')
+                                ? readJsonlSafe(fp)
+                                : readJsonSafe(fp);
+                            result.parseable = data !== null && (Array.isArray(data) ? data.length > 0 : true);
+                            if (data && !Array.isArray(data) && data.Results) {
+                                result.results_count = data.Results.length;
+                            }
                         }
                     }
                     return result;
@@ -370,7 +422,10 @@ app.get('/api/debug', (req, res) => {
     res.json(info);
 });
 
-// ─── Iniciar servidor ───────────────────────────────────────────────────────
+// =====================================================================
+//  Iniciar servidor
+// =====================================================================
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log('');
     console.log('+========================================================+');
@@ -381,22 +436,27 @@ app.listen(PORT, '0.0.0.0', () => {
     // Listar archivos disponibles al inicio
     if (fs.existsSync(DATA_DIR)) {
         const files = fs.readdirSync(DATA_DIR);
-        console.log(`[VulnCorp] Archivos en ${DATA_DIR}: ${files.length}`);
-        files.forEach(f => {
+        const dataFiles = files.filter(f => {
+            try { return fs.statSync(path.join(DATA_DIR, f)).isFile(); }
+            catch (e) { return false; }
+        });
+        console.log(`[VulnCorp] Archivos en ${DATA_DIR}: ${dataFiles.length}`);
+        dataFiles.forEach(f => {
             try {
                 const fp = path.join(DATA_DIR, f);
                 const stats = fs.statSync(fp);
-                if (stats.isFile()) {
-                    console.log(`  - ${f} (${stats.size} bytes)`);
-                }
+                const buf = fs.readFileSync(fp);
+                let enc = 'UTF-8';
+                if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) enc = 'UTF-8+BOM';
+                if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) enc = 'UTF-16LE';
+                console.log(`  - ${f} (${stats.size} bytes, ${enc})`);
             } catch (e) { /* ignorar */ }
         });
-        if (files.length === 0) {
+        if (dataFiles.length === 0) {
             console.log('[VulnCorp] No hay archivos de escaneo.');
-            console.log('[VulnCorp] Ejecute ./scripts/scan.sh para generar reportes.');
+            console.log('[VulnCorp] Ejecute ./scripts/scan.sh o .\\scripts\\scan.ps1');
         }
     } else {
         console.log(`[VulnCorp] ADVERTENCIA: Directorio no encontrado: ${DATA_DIR}`);
-        console.log('[VulnCorp] Ejecute ./scripts/scan.sh para generar reportes.');
     }
 });

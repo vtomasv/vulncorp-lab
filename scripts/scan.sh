@@ -1,85 +1,101 @@
-#!/bin/bash
+#!/usr/bin/env bash
 ###############################################################################
 #  VulnCorp Lab — Escaneo de Vulnerabilidades con Trivy
-#  Curso: Gestión de Vulnerabilidades con Enfoque MITRE — 2026
+#  Curso: Gestion de Vulnerabilidades con Enfoque MITRE — 2026
 #
-#  Compatible con: Linux, macOS (Intel/ARM), Windows (Git Bash, MINGW, WSL2)
+#  Compatible con: Linux, macOS, Windows (Git Bash / WSL2)
+#
+#  IMPORTANTE: Este script NUNCA usa el flag --output de Trivy porque tiene
+#  bugs conocidos en Windows (Issue #1698, #8884). En su lugar, usa
+#  redireccion de stdout del shell (>) que funciona en todos los OS.
 #
 #  Uso:
 #    ./scripts/scan.sh              # Modo normal
-#    ./scripts/scan.sh --verbose    # Modo verbose
-#
-#  NOTA TECNICA: Este script usa redireccion stdout (>) en lugar del flag
-#  --output de Trivy para escribir archivos. Esto evita el bug conocido
-#  de Trivy en Windows donde --output no genera archivos (Issue #1698).
-#  La redireccion es manejada por el shell, no por Trivy, y funciona
-#  en todos los sistemas operativos.
+#    ./scripts/scan.sh --verbose    # Modo verbose (muestra salida de Trivy)
 ###############################################################################
 
-# --- Argumentos ---
-VERBOSE=false
-for arg in "$@"; do
-    case "$arg" in
-        --verbose|-v) VERBOSE=true ;;
-    esac
-done
+set -euo pipefail
 
-# --- Deteccion de plataforma ---
-OS_TYPE="linux"
-case "$(uname -s 2>/dev/null || echo Windows_NT)" in
-    MINGW*|MSYS*|CYGWIN*) OS_TYPE="windows-bash" ;;
-    Darwin*)               OS_TYPE="macos" ;;
+# --- Detectar plataforma ---
+PLATFORM="linux"
+IS_WINDOWS=false
+IS_MACOS=false
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        PLATFORM="windows-gitbash"
+        IS_WINDOWS=true
+        ;;
+    Darwin*)
+        PLATFORM="macos"
+        IS_MACOS=true
+        ;;
     Linux*)
-        grep -qi microsoft /proc/version 2>/dev/null && OS_TYPE="wsl" || OS_TYPE="linux"
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+            PLATFORM="wsl2"
+        else
+            PLATFORM="linux"
+        fi
         ;;
 esac
 
-# --- Colores (solo si la terminal los soporta) ---
-USE_COLOR=false
-if [ -t 1 ]; then
-    case "$TERM" in
-        xterm*|screen*|tmux*|vt100*) USE_COLOR=true ;;
-    esac
-    [ -n "$WT_SESSION" ] && USE_COLOR=true
-    [ -n "$TERM_PROGRAM" ] && USE_COLOR=true
-fi
-
-if [ "$USE_COLOR" = true ]; then
-    R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-    C='\033[0;36m'; N='\033[0m'; BOLD='\033[1m'
-else
-    R=''; G=''; Y=''; B=''; C=''; N=''; BOLD=''
-fi
-
-# --- Funciones de utilidad ---
-log()  { echo -e "$1"; }
-info() { echo -e "  ${C}[i]${N} $1"; }
-ok()   { echo -e "  ${G}[OK]${N} $1"; }
-warn() { echo -e "  ${Y}[!]${N} $1"; }
-fail() { echo -e "  ${R}[X]${N} $1"; }
-
-# --- Directorio de trabajo ---
+# --- Directorios (usar rutas relativas al script) ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="${PROJECT_DIR}/data"
+LOG_FILE="${DATA_DIR}/scan.log"
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+
 mkdir -p "$DATA_DIR"
 
-# Archivo de log
-LOG_FILE="${DATA_DIR}/scan.log"
-: > "$LOG_FILE"
+# --- Verbose mode ---
+VERBOSE=false
+if [ "${1:-}" = "--verbose" ] || [ "${1:-}" = "-v" ]; then
+    VERBOSE=true
+fi
+
+# --- Colores (solo si la terminal los soporta) ---
+if [ -t 1 ] && command -v tput &>/dev/null && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+    R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+    C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
+else
+    R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
+fi
+
+# --- Funciones de logging ---
+log()  { printf "%b\n" "$*"; }
+ok()   { log "  ${G}[OK]${N} $*"; }
+warn() { log "  ${Y}[!]${N} $*"; }
+fail() { log "  ${R}[X]${N} $*"; }
+info() { log "  ${C}[i]${N} $*"; }
 
 log_to_file() {
-    echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
+    echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"
 }
 
-log_to_file "=== VulnCorp Scan Log ==="
-log_to_file "Plataforma: ${OS_TYPE}"
-log_to_file "uname: $(uname -a 2>/dev/null || echo 'N/A')"
-log_to_file "DATA_DIR: ${DATA_DIR}"
-log_to_file "pwd: $(pwd)"
+# --- Iniciar log ---
+echo "=== VulnCorp Scan Log ===" > "$LOG_FILE"
+log_to_file "Timestamp: $TIMESTAMP"
+log_to_file "Platform: $PLATFORM"
+log_to_file "Shell: $BASH_VERSION"
+log_to_file "DataDir: $DATA_DIR"
 
-# --- Timestamp ---
-TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+# --- Detectar Python ---
+PYTHON_CMD=""
+for cmd in python3 python py; do
+    if command -v "$cmd" &>/dev/null; then
+        ver=$("$cmd" --version 2>&1 || true)
+        if echo "$ver" | grep -q "Python 3"; then
+            PYTHON_CMD="$cmd"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON_CMD" ]; then
+    fail "Python 3 no encontrado. Instale Python 3.8+."
+    exit 1
+fi
 
 # --- Imagenes a escanear ---
 # Formato: nombre|imagen|zona|exposicion|criticidad
@@ -93,9 +109,9 @@ SERVICES=(
     "ftp-server|delfer/alpine-ftp-server|corporativa|red-interna|media"
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 #  PASO 1: Verificar herramientas
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 log ""
 log "${BOLD}${C}+============================================================+${N}"
@@ -103,211 +119,184 @@ log "${BOLD}${C}|     VulnCorp -- Escaner de Vulnerabilidades (Trivy)        |${
 log "${BOLD}${C}|     Unidad 1: Gestion de Vulnerabilidades (MITRE)          |${N}"
 log "${BOLD}${C}+============================================================+${N}"
 log ""
-info "Plataforma: ${BOLD}${OS_TYPE}${N}"
-info "Directorio: ${BOLD}${DATA_DIR}${N}"
-[ "$VERBOSE" = true ] && info "Modo: ${Y}VERBOSE${N}"
+info "Plataforma: ${PLATFORM}"
+info "Directorio: ${DATA_DIR}"
 log ""
 
 log "${Y}[1/4] Verificando herramientas...${N}"
 
-# Verificar Docker
-if ! command -v docker &>/dev/null; then
-    fail "Docker no encontrado. Instale Docker Desktop."
+# Docker
+if command -v docker &>/dev/null; then
+    docker_ver=$(docker --version 2>&1 || echo "desconocida")
+    ok "Docker: ${docker_ver}"
+else
+    fail "Docker no encontrado."
     exit 1
 fi
-ok "Docker: $(docker --version 2>&1 | head -1)"
 
-# Verificar Trivy
+# Trivy
 if ! command -v trivy &>/dev/null; then
-    warn "Trivy no encontrado. Intentando instalar..."
-    case "$OS_TYPE" in
-        macos)
-            if command -v brew &>/dev/null; then
-                brew install trivy
-            else
-                fail "Instale Trivy: brew install trivy"
-                exit 1
-            fi
-            ;;
-        windows-bash)
-            fail "Instale Trivy manualmente:"
-            log "      choco install trivy"
-            log "      scoop install trivy"
-            log "      https://github.com/aquasecurity/trivy/releases"
-            exit 1
-            ;;
-        *)
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
-            ;;
-    esac
+    fail "Trivy no encontrado."
+    info "Instale con:"
+    log "    Linux:   sudo apt install trivy  /  brew install trivy"
+    log "    macOS:   brew install trivy"
+    log "    Windows: choco install trivy  /  scoop install trivy"
+    exit 1
 fi
+trivy_ver=$(trivy version 2>&1 | head -1)
+ok "Trivy: ${trivy_ver}"
+log_to_file "Trivy: ${trivy_ver}"
 
-TRIVY_VER=$(trivy --version 2>&1 | head -1)
-ok "Trivy: ${TRIVY_VER}"
-log_to_file "Trivy: ${TRIVY_VER}"
-log_to_file "Trivy path: $(command -v trivy)"
+# Python
+python_ver=$("$PYTHON_CMD" --version 2>&1)
+ok "Python: ${python_ver}"
 
-# Verificar Python
-if ! command -v python3 &>/dev/null; then
-    if command -v python &>/dev/null; then
-        alias python3=python
-    else
-        fail "Python 3 no encontrado."
-        exit 1
-    fi
-fi
-ok "Python: $(python3 --version 2>&1)"
-
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 #  PASO 2: Actualizar base de datos de vulnerabilidades
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 log ""
 log "${Y}[2/4] Actualizando base de datos de vulnerabilidades...${N}"
 info "Esto puede tomar unos minutos la primera vez."
 
-# Limpiar cache de escaneo previo
+# Limpiar scan cache
 trivy clean --scan-cache >> "$LOG_FILE" 2>&1 || true
 
-DB_OK=false
+db_ok=false
 for attempt in 1 2 3; do
-    log_to_file "DB download attempt ${attempt}/3"
+    log_to_file "DB download attempt $attempt/3"
 
-    DB_OUTPUT=$(trivy image --download-db-only 2>&1)
-    DB_EXIT=$?
-    log_to_file "DB exit code: ${DB_EXIT}"
-    log_to_file "DB output: ${DB_OUTPUT}"
-
-    if [ $DB_EXIT -eq 0 ]; then
-        DB_OK=true
+    db_err="${DATA_DIR}/db_download.err"
+    if trivy image --download-db-only > /dev/null 2>"$db_err"; then
+        db_ok=true
         ok "Base de datos actualizada"
+        rm -f "$db_err"
         break
     fi
 
-    warn "Intento ${attempt}/3 fallido. Limpiando DB..."
+    warn "Intento $attempt/3 fallido."
+    if [ -f "$db_err" ]; then
+        tail -3 "$db_err" | while read -r line; do
+            log "    $line"
+        done
+    fi
+    info "Limpiando DB y reintentando..."
     trivy clean --vuln-db >> "$LOG_FILE" 2>&1 || true
-    sleep 2
+    sleep 3
 done
 
-if [ "$DB_OK" = false ]; then
-    fail "No se pudo descargar la base de datos."
+if [ "$db_ok" = false ]; then
+    fail "No se pudo descargar la base de datos despues de 3 intentos."
     fail "Verifique su conexion a Internet."
-    log "  Revise el log: ${LOG_FILE}"
     exit 1
 fi
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 #  PASO 3: Escanear imagenes
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 log ""
 log "${Y}[3/4] Escaneando imagenes del laboratorio VulnCorp...${N}"
 
-# Limpiar reportes anteriores
-rm -f "${DATA_DIR}/scan_summary.jsonl" 2>/dev/null || true
+# Limpiar resumen anterior
+rm -f "${DATA_DIR}/scan_summary.jsonl"
 
 scan_image() {
     local entry="$1"
-
-    # Parsear campos separados por |
     local name image zone exposure criticality
     IFS='|' read -r name image zone exposure criticality <<< "$entry"
 
     local report_file="${DATA_DIR}/${name}_trivy.json"
+    local trivy_stderr="${DATA_DIR}/${name}_scan.err"
 
     log ""
-    log "${B}------------------------------------------------------------${N}"
-    log "${BOLD}  Escaneando: ${C}${name}${N}"
+    log "  ${B}------------------------------------------------------------${N}"
+    log "  Escaneando: ${BOLD}${name}${N}"
     log "  Imagen:     ${image}"
     log "  Zona:       ${zone} | Exposicion: ${exposure} | Criticidad: ${criticality}"
-    log "  Reporte:    ${report_file}"
-    log "${B}------------------------------------------------------------${N}"
+    log "  ${B}------------------------------------------------------------${N}"
 
-    log_to_file "=== Scan: ${name} (${image}) ==="
+    log_to_file "=== Scan: $name ($image) ==="
 
     local scan_ok=false
     local crit=0 high=0 med=0 low=0 total=0
 
     for attempt in 1 2; do
-        [ $attempt -gt 1 ] && {
-            warn "Reintento ${attempt}/2 - Limpiando cache..."
+        if [ $attempt -gt 1 ]; then
+            warn "Reintento $attempt/2 - Limpiando cache..."
             trivy clean --scan-cache >> "$LOG_FILE" 2>&1 || true
-            sleep 1
-        }
-
-        # ─── ESCANEO ─────────────────────────────────────────────────
-        # CLAVE: Usamos redireccion stdout (>) en lugar de --output.
-        # Esto evita el bug de Trivy en Windows donde --output no
-        # genera archivos (Issue #1698 de aquasecurity/trivy).
-        # La redireccion > es manejada por el shell (bash/MINGW),
-        # que si sabe escribir en rutas POSIX, a diferencia de Trivy
-        # que es un binario nativo de Windows.
-        local trivy_stderr="${DATA_DIR}/${name}_scan.err"
-
-        trivy image \
-            --format json \
-            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-            --skip-db-update \
-            "$image" \
-            > "$report_file" \
-            2> "$trivy_stderr"
-
-        local exit_code=$?
-
-        # Guardar stderr en log
-        if [ -f "$trivy_stderr" ]; then
-            cat "$trivy_stderr" >> "$LOG_FILE"
-            if [ "$VERBOSE" = true ]; then
-                log "${C}  --- Salida de Trivy (stderr) ---${N}"
-                cat "$trivy_stderr"
-                log "${C}  --- Fin ---${N}"
-            fi
+            sleep 2
         fi
 
-        log_to_file "Exit code: ${exit_code}"
+        # Eliminar reporte anterior
+        rm -f "$report_file" "$trivy_stderr"
 
-        # Verificar exit code
+        # ---- ESCANEO ----
+        # CLAVE: Usamos redireccion de stdout (>) en lugar de --output.
+        # Esto funciona en todos los OS porque el shell maneja la escritura.
+        log_to_file "Running: trivy image --format json --skip-db-update $image > $report_file"
+
+        if $VERBOSE; then
+            trivy image --format json \
+                --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+                --skip-db-update \
+                "$image" > "$report_file" 2> >(tee "$trivy_stderr" >&2)
+            local exit_code=$?
+        else
+            trivy image --format json \
+                --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+                --skip-db-update \
+                "$image" > "$report_file" 2>"$trivy_stderr"
+            local exit_code=$?
+        fi
+
+        log_to_file "Exit code: $exit_code"
+
         if [ $exit_code -ne 0 ]; then
-            fail "Trivy fallo (exit code: ${exit_code})"
+            fail "Trivy fallo (exit code: $exit_code)"
             if [ -f "$trivy_stderr" ]; then
-                log "${Y}$(tail -5 "$trivy_stderr")${N}"
+                tail -5 "$trivy_stderr" | while read -r line; do
+                    log "    $line"
+                done
             fi
             continue
         fi
 
-        # Verificar que el archivo existe
+        # Verificar que el archivo existe y tiene contenido
         if [ ! -f "$report_file" ]; then
-            fail "Archivo de reporte no se genero: ${report_file}"
-            log_to_file "Report file missing after scan"
+            fail "Archivo de reporte no se genero"
             continue
         fi
 
-        # Verificar que no esta vacio
-        local fsize
-        fsize=$(wc -c < "$report_file" 2>/dev/null | tr -d ' ')
-        fsize=${fsize:-0}
-
-        if [ "$fsize" -lt 10 ] 2>/dev/null; then
-            warn "Reporte muy pequeno (${fsize} bytes). Posible error."
-            if [ "$VERBOSE" = true ]; then
-                log "  Contenido: $(cat "$report_file")"
-            fi
-            log_to_file "Report too small: ${fsize} bytes"
+        local file_size
+        file_size=$(wc -c < "$report_file" | tr -d ' ')
+        if [ "$file_size" -lt 10 ]; then
+            warn "Reporte muy pequeno ($file_size bytes)"
             continue
         fi
 
-        info "Archivo generado: ${fsize} bytes"
-        log_to_file "Report size: ${fsize} bytes"
+        # Limpiar BOM si existe (Windows puede agregar BOM via redireccion)
+        local first_bytes
+        first_bytes=$(xxd -l 3 -p "$report_file" 2>/dev/null || od -A n -t x1 -N 3 "$report_file" 2>/dev/null | tr -d ' ')
+        if [ "$first_bytes" = "efbbbf" ]; then
+            log_to_file "BOM detectado en $report_file - eliminando"
+            tail -c +4 "$report_file" > "${report_file}.tmp" && mv "${report_file}.tmp" "$report_file"
+        fi
 
-        # ─── CONTAR VULNERABILIDADES ─────────────────────────────────
+        info "Archivo generado: ${file_size} bytes"
+        log_to_file "Report size: $file_size bytes"
+
+        # ---- CONTAR VULNERABILIDADES ----
         local counts
-        counts=$(python3 -c "
+        counts=$("$PYTHON_CMD" -c "
 import json, sys
 try:
     with open('''${report_file}''', encoding='utf-8-sig') as f:
         raw = f.read()
-    # Limpiar BOM y caracteres nulos
     raw = raw.lstrip('\ufeff').replace('\x00', '').strip()
+    if not raw:
+        print('0 0 0 0 0')
+        sys.exit(0)
     data = json.loads(raw)
     c = h = m = l = 0
     for r in data.get('Results', []):
@@ -319,7 +308,7 @@ try:
             elif s == 'LOW': l += 1
     print(f'{c} {h} {m} {l} {c+h+m+l}')
 except Exception as e:
-    print(f'0 0 0 0 0', file=sys.stdout)
+    print('0 0 0 0 0', file=sys.stdout)
     print(f'ERROR: {e}', file=sys.stderr)
 " 2>>"$LOG_FILE")
 
@@ -329,11 +318,10 @@ except Exception as e:
 
         log_to_file "Counts: C=${crit} H=${high} M=${med} L=${low} T=${total}"
 
-        # Validar: si 0 vulns y primer intento, reintentar
+        # Si 0 vulnerabilidades en primer intento, verificar
         if [ "$total" = "0" ] && [ $attempt -lt 2 ]; then
-            # Verificar si hay paquetes (si hay paquetes pero 0 vulns, puede ser legitimo)
             local pkg_check
-            pkg_check=$(python3 -c "
+            pkg_check=$("$PYTHON_CMD" -c "
 import json
 with open('''${report_file}''', encoding='utf-8-sig') as f:
     raw = f.read().lstrip('\ufeff').replace('\x00', '').strip()
@@ -342,7 +330,7 @@ results = data.get('Results', [])
 pkgs = sum(len(r.get('Packages', [])) for r in results)
 has_v = any('Vulnerabilities' in r for r in results)
 print(f'{len(results)} {pkgs} {has_v}')
-" 2>/dev/null)
+" 2>/dev/null || echo "0 0 False")
 
             local num_results num_pkgs has_vulns_key
             read -r num_results num_pkgs has_vulns_key <<< "$pkg_check"
@@ -356,7 +344,7 @@ print(f'{len(results)} {pkgs} {has_v}')
             fi
         fi
 
-        # Limpiar archivo de error si todo salio bien
+        # Limpiar archivo de error
         rm -f "$trivy_stderr" 2>/dev/null || true
         scan_ok=true
         break
@@ -386,18 +374,20 @@ for entry in "${SERVICES[@]}"; do
     scan_image "$entry"
 done
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 #  PASO 4: Reporte consolidado
-# ═══════════════════════════════════════════════════════════════════════════════
+# =====================================================================
 
 log ""
 log "${Y}[4/4] Generando reporte consolidado...${N}"
 
-python3 << 'PYEOF'
+export DATA_DIR
+
+"$PYTHON_CMD" << 'PYEOF'
 import json, os, sys
 
 data_dir = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'))
-# Fallback: usar variable de entorno o buscar el directorio
+# Fallback: buscar el directorio
 for candidate in [data_dir, './data', '../data']:
     summary = os.path.join(candidate, 'scan_summary.jsonl')
     if os.path.exists(summary):
@@ -456,9 +446,6 @@ with open(out, 'w', encoding='utf-8', newline='\n') as f:
 
 print(f"  Reporte consolidado: {out}")
 PYEOF
-
-# Pasar DATA_DIR como variable de entorno para Python
-export DATA_DIR
 
 log ""
 log "${G}${BOLD}+============================================================+${N}"

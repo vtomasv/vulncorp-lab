@@ -212,8 +212,10 @@ vulncorp-lab/
 │   ├── README.md               # Documentación del Lab 02
 │   ├── scripts/
 │   │   ├── setup_lab02.sh      # Setup (Syft + Grype + plataformas)
-│   │   ├── generate_sbom.sh    # Genera SBOMs con Syft (CycloneDX)
-│   │   ├── scan_grype.sh       # Escanea con Grype
+│   │   ├── generate_sbom.sh    # Genera SBOMs con Syft (Linux/macOS/Git Bash)
+│   │   ├── generate_sbom.ps1   # Genera SBOMs con Syft (Windows PowerShell)
+│   │   ├── scan_grype.sh       # Escanea con Grype (Linux/macOS/Git Bash)
+│   │   ├── scan_grype.ps1      # Escanea con Grype (Windows PowerShell)
 │   │   └── upload_reports.py   # Sube a DTrack y DefectDojo
 │   ├── data/
 │   │   ├── sbom/               # SBOMs generados
