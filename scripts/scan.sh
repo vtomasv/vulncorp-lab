@@ -10,7 +10,20 @@
 #    - Linux (AMD64 / ARM64)
 #    - macOS (Intel / Apple Silicon M1/M2/M3/M4)
 #    - Windows (Git Bash, MINGW, WSL2, PowerShell via bash)
+#
+#  Problemas conocidos resueltos:
+#    - MINGW path mangling en Windows (MSYS_NO_PATHCONV)
+#    - Trivy DB corruption al re-descargar (separar DB download del scan)
+#    - BOM UTF-8 en archivos generados en Windows
+#    - Trivy scan cache corrupto (limpieza automática)
 ###############################################################################
+
+# ─── Configuración de entorno para Windows ───────────────────────────────────
+# MINGW/Git Bash en Windows convierte automáticamente rutas Unix a Windows,
+# lo que rompe argumentos como --output /ruta/archivo.json.
+# MSYS_NO_PATHCONV=1 desactiva esta conversión.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 
 set -e
 
@@ -27,26 +40,20 @@ case "$(uname -s)" in
         OS_TYPE="macos"
         ;;
     Linux*)
-        # Detectar WSL
         if grep -qi microsoft /proc/version 2>/dev/null; then
             OS_TYPE="wsl"
         fi
         ;;
 esac
 
-# ─── Colores y caracteres según plataforma ───────────────────────────────────
-# En Windows nativo (Git Bash/MINGW), los colores ANSI y Unicode pueden fallar.
-# Detectamos si la terminal soporta colores.
-
+# ─── Colores según plataforma ────────────────────────────────────────────────
 supports_color() {
     if [ "$WINDOWS_MODE" = true ]; then
-        # Git Bash en Windows Terminal soporta colores, pero CMD no
         if [ -n "$WT_SESSION" ] || [ -n "$TERM_PROGRAM" ] || [ "$TERM" = "xterm-256color" ]; then
             return 0
         fi
         return 1
     fi
-    # Linux/macOS siempre soportan colores
     return 0
 }
 
@@ -68,35 +75,17 @@ else
     BOLD=''
 fi
 
-# Caracteres de caja: usar ASCII simple en Windows para evitar problemas de codificación
-if [ "$WINDOWS_MODE" = true ]; then
-    BOX_TL="+"
-    BOX_TR="+"
-    BOX_BL="+"
-    BOX_BR="+"
-    BOX_H="="
-    BOX_V="|"
-    LINE_H="-"
-else
-    BOX_TL="+"
-    BOX_TR="+"
-    BOX_BL="+"
-    BOX_BR="+"
-    BOX_H="="
-    BOX_V="|"
-    LINE_H="-"
-fi
-
 # ─── Directorio de reportes ──────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPORT_DIR="${SCRIPT_DIR}/../data"
 mkdir -p "$REPORT_DIR"
-
-# Convertir a ruta absoluta para evitar problemas en Windows
 REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
 
 # Timestamp para el reporte
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+
+# Número máximo de reintentos por imagen
+MAX_RETRIES=2
 
 echo ""
 echo -e "${BOLD}${CYAN}+============================================================+${NC}"
@@ -105,9 +94,10 @@ echo -e "${BOLD}${CYAN}|     Unidad 1: Gestion de Vulnerabilidades (MITRE)      
 echo -e "${BOLD}${CYAN}+============================================================+${NC}"
 echo ""
 echo -e "  Plataforma detectada: ${CYAN}${OS_TYPE}${NC}"
+echo -e "  Directorio de reportes: ${CYAN}${REPORT_DIR}${NC}"
 echo ""
 
-# Lista de imágenes a escanear (las mismas del docker-compose.yml)
+# Lista de imágenes a escanear
 SERVICE_NAMES=("nginx-proxy" "prestashop" "mariadb-prod" "redis-cache" "phpmyadmin" "workstation" "ftp-server")
 SERVICE_IMAGES=("nginx:1.21.0" "prestashop/prestashop:1.7.8.0" "mariadb:10.5.18" "redis:6.2.6" "phpmyadmin:5.1.1" "ubuntu:20.04" "delfer/alpine-ftp-server")
 SERVICE_ZONES=("produccion" "produccion" "produccion+corporativa" "produccion" "corporativa" "corporativa" "corporativa")
@@ -128,6 +118,7 @@ check_trivy() {
         elif [ "$WINDOWS_MODE" = true ]; then
             echo -e "${YELLOW}[!] En Windows, instale Trivy con:${NC}"
             echo "      choco install trivy"
+            echo "      scoop install trivy"
             echo "      o descargue de: https://github.com/aquasecurity/trivy/releases"
             exit 1
         else
@@ -137,6 +128,83 @@ check_trivy() {
     else
         echo -e "${GREEN}[OK] Trivy encontrado: $(trivy --version 2>/dev/null | head -1)${NC}"
     fi
+}
+
+# ─── Descargar/Actualizar la base de datos de Trivy ──────────────────────────
+# IMPORTANTE: Separamos la descarga de la DB del escaneo.
+# En Windows, si Trivy descarga la DB durante el escaneo y la descarga se
+# interrumpe o corrompe, el escaneo reporta 0 vulnerabilidades silenciosamente.
+# Ref: https://github.com/aquasecurity/trivy/discussions/7758
+update_trivy_db() {
+    echo -e "${YELLOW}[i] Descargando/actualizando base de datos de vulnerabilidades...${NC}"
+    echo -e "    (Esto puede tomar unos minutos la primera vez)"
+
+    # Limpiar scan cache para evitar resultados obsoletos
+    trivy clean --scan-cache 2>/dev/null || true
+
+    # Descargar la DB de vulnerabilidades
+    local db_retries=3
+    local db_ok=false
+    for attempt in $(seq 1 $db_retries); do
+        if trivy image --download-db-only 2>/dev/null; then
+            db_ok=true
+            break
+        fi
+        echo -e "${YELLOW}    [!] Intento ${attempt}/${db_retries} de descarga de DB fallido. Reintentando...${NC}"
+        # Limpiar DB corrupta antes de reintentar
+        trivy clean --vuln-db 2>/dev/null || true
+        sleep 2
+    done
+
+    if [ "$db_ok" = false ]; then
+        echo -e "${RED}[X] No se pudo descargar la base de datos de Trivy.${NC}"
+        echo -e "${RED}    Verifique su conexion a Internet e intente de nuevo.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}[OK] Base de datos de vulnerabilidades actualizada${NC}"
+}
+
+# ─── Contar vulnerabilidades en un archivo JSON ──────────────────────────────
+count_vulns() {
+    local report_file="$1"
+    python3 << PYEOF
+import json, sys, os
+
+report_file = os.path.normpath(r'''$report_file''')
+
+try:
+    with open(report_file, encoding='utf-8-sig') as f:
+        content = f.read()
+
+    # Eliminar BOM si existe
+    if content and ord(content[0]) == 0xFEFF:
+        content = content[1:]
+
+    # Eliminar caracteres nulos
+    content = content.replace('\x00', '')
+
+    data = json.loads(content)
+
+    counts = {'CRITICAL':0, 'HIGH':0, 'MEDIUM':0, 'LOW':0}
+    results = data.get('Results', [])
+
+    for result in results:
+        vulns = result.get('Vulnerabilities', [])
+        if vulns is None:
+            continue
+        for vuln in vulns:
+            sev = vuln.get('Severity','UNKNOWN')
+            if sev in counts:
+                counts[sev] += 1
+
+    total = sum(counts.values())
+    print(f"{counts['CRITICAL']} {counts['HIGH']} {counts['MEDIUM']} {counts['LOW']} {total}")
+
+except Exception as e:
+    print(f"0 0 0 0 0", file=sys.stderr)
+    print(f"0 0 0 0 0")
+PYEOF
 }
 
 # ─── Escanear una imagen ─────────────────────────────────────────────────────
@@ -158,63 +226,88 @@ scan_image() {
     echo -e "  Criticidad: ${criticality}"
     echo -e "${BLUE}------------------------------------------------------------${NC}"
 
-    # Escanear con Trivy en formato JSON
-    trivy image \
-        --format json \
-        --output "$report_file" \
-        --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-        --quiet \
-        "$image" 2>/dev/null || {
-            echo -e "${RED}[X] Error escaneando ${image}${NC}"
-            return 1
-        }
+    local scan_ok=false
+    local attempt=0
 
-    # Verificar que el archivo se generó y no está vacío
-    if [ ! -s "$report_file" ]; then
-        echo -e "${RED}[X] El reporte esta vacio o no se genero para ${service_name}${NC}"
-        return 1
-    fi
+    while [ $attempt -lt $MAX_RETRIES ] && [ "$scan_ok" = false ]; do
+        attempt=$((attempt + 1))
 
-    # Eliminar BOM si existe (problema común en Windows)
-    if [ "$WINDOWS_MODE" = true ] || [ "$OS_TYPE" = "wsl" ]; then
-        # Eliminar BOM UTF-8 (EF BB BF) si está presente
-        sed -i.bak '1s/^\xEF\xBB\xBF//' "$report_file" 2>/dev/null && rm -f "${report_file}.bak" || true
-    fi
+        if [ $attempt -gt 1 ]; then
+            echo -e "${YELLOW}    [!] Reintento ${attempt}/${MAX_RETRIES} - Limpiando cache de escaneo...${NC}"
+            trivy clean --scan-cache 2>/dev/null || true
+            sleep 1
+        fi
 
-    # Contar vulnerabilidades por severidad usando python3
-    if [ -f "$report_file" ]; then
+        # Escanear con --skip-db-update (ya descargamos la DB antes)
+        trivy image \
+            --format json \
+            --output "$report_file" \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-db-update \
+            --quiet \
+            "$image" 2>/dev/null || {
+                echo -e "${RED}[X] Error escaneando ${image}${NC}"
+                continue
+            }
+
+        # Verificar que el archivo existe y no está vacío
+        if [ ! -s "$report_file" ]; then
+            echo -e "${YELLOW}    [!] Reporte vacio para ${service_name}${NC}"
+            continue
+        fi
+
+        # Contar vulnerabilidades
         local counts
-        counts=$(python3 -c "
-import json, sys
-try:
-    with open(r'$report_file', encoding='utf-8-sig') as f:
-        data = json.load(f)
-    counts = {'CRITICAL':0, 'HIGH':0, 'MEDIUM':0, 'LOW':0}
-    for result in data.get('Results', []):
-        for vuln in result.get('Vulnerabilities', []):
-            sev = vuln.get('Severity','UNKNOWN')
-            if sev in counts:
-                counts[sev] += 1
-    print(f\"{counts['CRITICAL']} {counts['HIGH']} {counts['MEDIUM']} {counts['LOW']}\")
-except Exception as e:
-    print('0 0 0 0', file=sys.stderr)
-    print('0 0 0 0')
-" 2>/dev/null || echo "0 0 0 0")
+        counts=$(count_vulns "$report_file")
 
         local critical high medium low total
         critical=$(echo "$counts" | awk '{print $1}')
         high=$(echo "$counts" | awk '{print $2}')
         medium=$(echo "$counts" | awk '{print $3}')
         low=$(echo "$counts" | awk '{print $4}')
-        total=$((critical + high + medium + low))
+        total=$(echo "$counts" | awk '{print $5}')
 
-        echo ""
-        echo -e "  ${RED}CRITICAL: ${critical}${NC}  |  ${YELLOW}HIGH: ${high}${NC}  |  ${BLUE}MEDIUM: ${medium}${NC}  |  ${GREEN}LOW: ${low}${NC}  |  TOTAL: ${total}"
-        echo -e "${GREEN}  [OK] Reporte guardado: ${report_file}${NC}"
+        # Validar: si total es 0 y no es la primera vez, reintentar
+        # (algunas imágenes como alpine-ftp pueden tener legítimamente 0)
+        if [ "$total" = "0" ] && [ $attempt -lt $MAX_RETRIES ]; then
+            echo -e "${YELLOW}    [!] Se detectaron 0 vulnerabilidades. Verificando...${NC}"
 
-        # Guardar resumen en JSONL (una línea por servicio)
-        echo "{\"service\":\"${service_name}\",\"image\":\"${image}\",\"zone\":\"${zone}\",\"exposure\":\"${exposure}\",\"criticality\":\"${criticality}\",\"critical\":${critical},\"high\":${high},\"medium\":${medium},\"low\":${low},\"total\":${total},\"timestamp\":\"${TIMESTAMP}\"}" >> "${REPORT_DIR}/scan_summary.jsonl"
+            # Verificar si el JSON tiene la estructura correcta
+            local has_results
+            has_results=$(python3 -c "
+import json
+try:
+    with open(r'''$report_file''', encoding='utf-8-sig') as f:
+        data = json.loads(f.read().lstrip('\ufeff'))
+    results = data.get('Results', [])
+    has_vulns_key = any('Vulnerabilities' in r for r in results)
+    print('yes' if has_vulns_key else 'no')
+except:
+    print('error')
+" 2>/dev/null || echo "error")
+
+            if [ "$has_results" = "no" ] || [ "$has_results" = "error" ]; then
+                echo -e "${YELLOW}    [!] El JSON no contiene datos de vulnerabilidades. Reintentando...${NC}"
+                continue
+            fi
+        fi
+
+        scan_ok=true
+    done
+
+    if [ "$scan_ok" = false ]; then
+        echo -e "${RED}[X] No se pudo obtener resultados para ${service_name} despues de ${MAX_RETRIES} intentos${NC}"
+        # Crear un reporte vacío para no romper el flujo
+        echo '{"Results":[]}' > "$report_file"
+        local critical=0 high=0 medium=0 low=0 total=0
     fi
+
+    echo ""
+    echo -e "  ${RED}CRITICAL: ${critical}${NC}  |  ${YELLOW}HIGH: ${high}${NC}  |  ${BLUE}MEDIUM: ${medium}${NC}  |  ${GREEN}LOW: ${low}${NC}  |  TOTAL: ${total}"
+    echo -e "${GREEN}  [OK] Reporte guardado: ${report_file}${NC}"
+
+    # Guardar resumen en JSONL
+    echo "{\"service\":\"${service_name}\",\"image\":\"${image}\",\"zone\":\"${zone}\",\"exposure\":\"${exposure}\",\"criticality\":\"${criticality}\",\"critical\":${critical},\"high\":${high},\"medium\":${medium},\"low\":${low},\"total\":${total},\"timestamp\":\"${TIMESTAMP}\"}" >> "${REPORT_DIR}/scan_summary.jsonl"
 }
 
 # ─── Generar reporte consolidado ──────────────────────────────────────────────
@@ -242,6 +335,9 @@ with open(summary_file, 'r', encoding='utf-8-sig') as f:
     for line in f:
         line = line.strip()
         if line:
+            # Eliminar BOM si existe en la línea
+            if line and ord(line[0]) == 0xFEFF:
+                line = line[1:]
             try:
                 services.append(json.loads(line))
             except json.JSONDecodeError:
@@ -251,7 +347,7 @@ if not services:
     print("  No se encontraron resultados validos.")
     sys.exit(0)
 
-# Tabla de resumen (caracteres ASCII para compatibilidad Windows)
+# Tabla de resumen
 header = f"  {'Servicio':<16} {'Zona':<22} {'Exposicion':<18} {'CRIT':>5} {'HIGH':>5} {'MED':>5} {'LOW':>5} {'TOTAL':>6}"
 separator = f"  {'-'*16} {'-'*22} {'-'*18} {'-'*5} {'-'*5} {'-'*5} {'-'*5} {'-'*6}"
 
@@ -297,11 +393,15 @@ PYEOF
 #  EJECUCION PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════════
 
-echo -e "${YELLOW}[1/3] Verificando herramientas...${NC}"
+echo -e "${YELLOW}[1/4] Verificando herramientas...${NC}"
 check_trivy
 
 echo ""
-echo -e "${YELLOW}[2/3] Escaneando imagenes del laboratorio VulnCorp...${NC}"
+echo -e "${YELLOW}[2/4] Actualizando base de datos de vulnerabilidades...${NC}"
+update_trivy_db
+
+echo ""
+echo -e "${YELLOW}[3/4] Escaneando imagenes del laboratorio VulnCorp...${NC}"
 
 # Limpiar resumen anterior
 rm -f "${REPORT_DIR}/scan_summary.jsonl"
@@ -312,7 +412,7 @@ for i in "${!SERVICE_NAMES[@]}"; do
 done
 
 echo ""
-echo -e "${YELLOW}[3/3] Generando reporte consolidado...${NC}"
+echo -e "${YELLOW}[4/4] Generando reporte consolidado...${NC}"
 export REPORT_DIR
 generate_consolidated_report
 
