@@ -8,22 +8,32 @@
 #  Toma los SBOMs generados por Syft (CycloneDX JSON) y los pasa por Grype
 #  para detectar vulnerabilidades conocidas.
 #
-#  Usa redireccion de stdout (>) para evitar problemas de rutas en Windows.
+#  SOLUCION WINDOWS: Grype es un binario nativo de Windows (.exe).
+#  Cuando se ejecuta desde Git Bash, las rutas POSIX (/c/Users/...)
+#  NO son reconocidas por Grype. Este script convierte las rutas
+#  a formato Windows nativo (C:\Users\...) para los argumentos de Grype,
+#  mientras mantiene rutas POSIX para los comandos de bash.
 ###############################################################################
 
 set -uo pipefail
 
 # --- Detectar plataforma ---
 IS_WINDOWS=false
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;; esac
+IS_GITBASH=false
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        IS_WINDOWS=true
+        IS_GITBASH=true
+        ;;
+    CYGWIN*)
+        IS_WINDOWS=true
+        ;;
+esac
 
 # --- Colores (compatibles con Git Bash) ---
 R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
 if [ -t 1 ]; then
-    if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
-        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
-    elif [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    if [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
         R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
         C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
     fi
@@ -35,6 +45,26 @@ warn() { log "  ${Y}[!]${N} $*"; }
 fail() { log "  ${R}[X]${N} $*"; }
 info() { log "  ${C}[i]${N} $*"; }
 
+# =====================================================================
+#  FUNCION CRITICA: Convertir ruta POSIX a ruta Windows nativa
+#  En Git Bash: /c/Users/nombre/... -> C:\Users\nombre\...
+#  En Linux/macOS: devuelve la ruta sin cambios
+# =====================================================================
+to_win_path() {
+    local p="$1"
+    if [ "$IS_GITBASH" = true ]; then
+        # Intentar con cygpath (viene con Git Bash)
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -w "$p"
+        else
+            # Fallback: conversion manual /c/... -> C:\...
+            echo "$p" | sed -E 's|^/([a-zA-Z])/|\1:\\|' | sed 's|/|\\|g'
+        fi
+    else
+        echo "$p"
+    fi
+}
+
 # --- Directorios ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAB02_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,7 +72,7 @@ SBOM_DIR="${LAB02_DIR}/data/sbom"
 GRYPE_DIR="${LAB02_DIR}/data/grype"
 mkdir -p "$GRYPE_DIR"
 
-# --- Detectar Python (compatible Git Bash) ---
+# --- Detectar Python (compatible Git Bash: python3 no existe en Windows) ---
 PYTHON_CMD=""
 for cmd in python3 python py; do
     if command -v "$cmd" >/dev/null 2>&1; then
@@ -91,17 +121,50 @@ if ! command -v grype >/dev/null 2>&1; then
     fi
     exit 1
 fi
-grype_ver=$(grype version 2>/dev/null | grep '^Application' || grype version 2>/dev/null | head -1)
+grype_ver=$(grype version 2>/dev/null | grep -i 'version' | head -1 || grype version 2>/dev/null | head -1 || echo "desconocida")
 ok "Grype: ${grype_ver}"
 
-# Verificar SBOMs
+# Mostrar plataforma detectada
+if [ "$IS_GITBASH" = true ]; then
+    info "Plataforma: Windows (Git Bash / MINGW)"
+    info "Las rutas se convertiran a formato Windows para Grype"
+elif [ "$IS_WINDOWS" = true ]; then
+    info "Plataforma: Windows (Cygwin)"
+else
+    info "Plataforma: $(uname -s)"
+fi
+
+# =====================================================================
+#  Buscar SBOMs
+# =====================================================================
+info "Buscando SBOMs en: ${SBOM_DIR}/"
+
+# Listar archivos para diagnostico
+if [ "$IS_WINDOWS" = true ]; then
+    info "Contenido del directorio SBOM:"
+    ls -la "$SBOM_DIR"/ 2>/dev/null | while IFS= read -r line; do
+        info "  $line"
+    done
+fi
+
 shopt -s nullglob
 SBOM_FILES=("$SBOM_DIR"/*_sbom_cyclonedx.json)
 shopt -u nullglob
 
 if [ ${#SBOM_FILES[@]} -eq 0 ]; then
     fail "No se encontraron SBOMs en ${SBOM_DIR}/"
-    info "Ejecute primero: ./scripts/generate_sbom.sh"
+    info "Archivos existentes en data/sbom/:"
+    ls -1 "$SBOM_DIR"/ 2>/dev/null | while IFS= read -r f; do
+        info "  - $f"
+    done
+    info ""
+    info "Ejecute primero:"
+    if [ "$IS_WINDOWS" = true ]; then
+        info "  PowerShell: .\\scripts\\generate_sbom.ps1"
+        info "  Git Bash:   bash scripts/generate_sbom.sh"
+    else
+        info "  ./scripts/generate_sbom.sh"
+    fi
     exit 1
 fi
 ok "SBOMs encontrados: ${#SBOM_FILES[@]} archivos"
@@ -109,7 +172,11 @@ log ""
 
 # Actualizar DB de Grype
 info "Actualizando base de datos de vulnerabilidades de Grype..."
-grype db update 2>/dev/null || warn "Usando base de datos existente"
+if grype db update 2>&1 | tail -3; then
+    ok "Base de datos actualizada"
+else
+    warn "Usando base de datos existente"
+fi
 log ""
 
 # Limpiar resumen anterior
@@ -117,6 +184,7 @@ rm -f "${GRYPE_DIR}/grype_summary.jsonl"
 
 TOTAL=${#SBOM_FILES[@]}
 CURRENT=0
+SCANNED_OK=0
 
 for SBOM_FILE in "${SBOM_FILES[@]}"; do
     CURRENT=$((CURRENT + 1))
@@ -124,26 +192,86 @@ for SBOM_FILE in "${SBOM_FILES[@]}"; do
 
     log "  ${B}------------------------------------------------------------${N}"
     log "  ${BOLD}[${CURRENT}/${TOTAL}] Escaneando: ${C}${BASENAME}${N}"
-    log "  SBOM: ${SBOM_FILE}"
     log "  ${B}------------------------------------------------------------${N}"
+
+    # =====================================================================
+    #  CLAVE: Convertir la ruta del SBOM para Grype
+    #  En Git Bash, Grype necesita: sbom:C:\Users\...\file.json
+    #  En Linux/macOS:              sbom:/home/user/.../file.json
+    # =====================================================================
+    if [ "$IS_WINDOWS" = true ]; then
+        SBOM_NATIVE=$(to_win_path "$SBOM_FILE")
+        GRYPE_INPUT="sbom:${SBOM_NATIVE}"
+        info "Ruta POSIX:   ${SBOM_FILE}"
+        info "Ruta Windows: ${SBOM_NATIVE}"
+    else
+        GRYPE_INPUT="sbom:${SBOM_FILE}"
+    fi
+    info "Argumento Grype: ${GRYPE_INPUT}"
+
+    # Verificar que el SBOM existe y tiene contenido
+    if [ ! -f "$SBOM_FILE" ]; then
+        fail "SBOM no encontrado: ${SBOM_FILE}"
+        continue
+    fi
+    SBOM_SIZE=$(wc -c < "$SBOM_FILE" 2>/dev/null | tr -d ' ')
+    if [ "${SBOM_SIZE:-0}" -lt 10 ]; then
+        fail "SBOM vacio o corrupto: ${SBOM_FILE} (${SBOM_SIZE} bytes)"
+        continue
+    fi
+    info "SBOM valido: ${SBOM_SIZE} bytes"
 
     # --- CycloneDX output (para DefectDojo) ---
     CYCLONEDX_OUT="${GRYPE_DIR}/${BASENAME}_grype_cyclonedx.json"
     info "Generando reporte CycloneDX..."
 
-    if grype "sbom:${SBOM_FILE}" -o cyclonedx-json > "$CYCLONEDX_OUT" 2>/dev/null; then
+    # Capturar stderr para diagnostico
+    GRYPE_ERR="${GRYPE_DIR}/${BASENAME}_grype_error.log"
+
+    if grype "${GRYPE_INPUT}" -o cyclonedx-json > "$CYCLONEDX_OUT" 2>"$GRYPE_ERR"; then
         clean_bom "$CYCLONEDX_OUT"
-        ok "CycloneDX: ${CYCLONEDX_OUT}"
+        if [ -f "$CYCLONEDX_OUT" ] && [ -s "$CYCLONEDX_OUT" ]; then
+            ok "CycloneDX: $(basename "$CYCLONEDX_OUT")"
+            rm -f "$GRYPE_ERR" 2>/dev/null || true
+        else
+            fail "Archivo CycloneDX vacio para ${BASENAME}"
+            if [ -f "$GRYPE_ERR" ] && [ -s "$GRYPE_ERR" ]; then
+                warn "Error de Grype:"
+                head -5 "$GRYPE_ERR" | while IFS= read -r line; do warn "  $line"; done
+            fi
+        fi
     else
-        warn "Error generando CycloneDX para ${BASENAME}"
+        fail "Error ejecutando Grype para ${BASENAME}"
+        if [ -f "$GRYPE_ERR" ] && [ -s "$GRYPE_ERR" ]; then
+            warn "Detalle del error:"
+            head -10 "$GRYPE_ERR" | while IFS= read -r line; do warn "  $line"; done
+        fi
+        # Intentar sin el prefijo sbom: como fallback
+        info "Intentando sin prefijo sbom:..."
+        if [ "$IS_WINDOWS" = true ]; then
+            FALLBACK_INPUT="${SBOM_NATIVE}"
+        else
+            FALLBACK_INPUT="${SBOM_FILE}"
+        fi
+        if grype "${FALLBACK_INPUT}" -o cyclonedx-json > "$CYCLONEDX_OUT" 2>"$GRYPE_ERR"; then
+            clean_bom "$CYCLONEDX_OUT"
+            ok "CycloneDX (fallback): $(basename "$CYCLONEDX_OUT")"
+        else
+            fail "Fallback tambien fallo para ${BASENAME}"
+            if [ -f "$GRYPE_ERR" ] && [ -s "$GRYPE_ERR" ]; then
+                head -5 "$GRYPE_ERR" | while IFS= read -r line; do warn "  $line"; done
+            fi
+            continue
+        fi
     fi
 
     # --- JSON detallado ---
     JSON_OUT="${GRYPE_DIR}/${BASENAME}_grype_detail.json"
-    grype "sbom:${SBOM_FILE}" -o json > "$JSON_OUT" 2>/dev/null || true
+    grype "${GRYPE_INPUT}" -o json > "$JSON_OUT" 2>/dev/null || \
+        grype "${FALLBACK_INPUT:-$SBOM_FILE}" -o json > "$JSON_OUT" 2>/dev/null || true
     clean_bom "$JSON_OUT"
 
-    # --- Contar vulnerabilidades (script Python temporal) ---
+    # --- Contar vulnerabilidades ---
     CRIT=0; HIGH=0; MED=0; LOW=0; NEG=0; TOT=0
     if [ -f "$JSON_OUT" ] && [ -s "$JSON_OUT" ]; then
         PY_COUNT="${GRYPE_DIR}/_count_tmp.py"
@@ -174,17 +302,22 @@ PYSCRIPT
         CRIT=${CRIT:-0}; HIGH=${HIGH:-0}; MED=${MED:-0}; LOW=${LOW:-0}; NEG=${NEG:-0}; TOT=${TOT:-0}
 
         log "  ${R}CRITICAL: ${CRIT}${N} | ${Y}HIGH: ${HIGH}${N} | ${B}MEDIUM: ${MED}${N} | ${G}LOW: ${LOW}${N} | NEG: ${NEG} | TOTAL: ${TOT}"
+        SCANNED_OK=$((SCANNED_OK + 1))
     fi
 
     # --- Tabla resumen ---
     TABLE_OUT="${GRYPE_DIR}/${BASENAME}_grype_table.txt"
-    grype "sbom:${SBOM_FILE}" -o table > "$TABLE_OUT" 2>/dev/null || true
-    ok "Tabla: ${TABLE_OUT}"
+    grype "${GRYPE_INPUT}" -o table > "$TABLE_OUT" 2>/dev/null || \
+        grype "${FALLBACK_INPUT:-$SBOM_FILE}" -o table > "$TABLE_OUT" 2>/dev/null || true
+    ok "Tabla: $(basename "$TABLE_OUT")"
 
     # Guardar linea de resumen
     printf '{"service":"%s","critical":%d,"high":%d,"medium":%d,"low":%d,"negligible":%d,"total":%d}\n' \
         "$BASENAME" "$CRIT" "$HIGH" "$MED" "$LOW" "$NEG" "$TOT" \
         >> "${GRYPE_DIR}/grype_summary.jsonl"
+
+    # Limpiar log de error si todo salio bien
+    rm -f "$GRYPE_ERR" 2>/dev/null || true
 
     log ""
 done
@@ -249,7 +382,7 @@ PYSCRIPT
 rm -f "$PY_GRYPE_SUMMARY" 2>/dev/null || true
 
 log ""
-ok "Escaneo con Grype completado"
+ok "Escaneo con Grype completado (${SCANNED_OK}/${TOTAL} exitosos)"
 info "Reportes en: ${GRYPE_DIR}/"
 log ""
 info "Proximo paso:"

@@ -8,23 +8,33 @@
 #  Este script genera el Software Bill of Materials (SBOM) de cada imagen
 #  del Lab 01 usando Syft en formato CycloneDX JSON.
 #
-#  NOTA: Usa redireccion de stdout (>) en lugar del flag -o file=path
-#  para evitar problemas de rutas en Windows.
+#  SOLUCION WINDOWS: Syft es un binario nativo de Windows (.exe).
+#  Cuando se ejecuta desde Git Bash, la redireccion stdout (>) es
+#  manejada por bash (funciona), pero los argumentos de Syft que
+#  contienen rutas deben ser convertidos a formato Windows nativo.
+#  Este script usa redireccion stdout para la salida y no pasa
+#  rutas como argumentos a Syft (solo nombres de imagenes Docker).
 ###############################################################################
 
 set -uo pipefail
 
 # --- Detectar plataforma ---
 IS_WINDOWS=false
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;; esac
+IS_GITBASH=false
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        IS_WINDOWS=true
+        IS_GITBASH=true
+        ;;
+    CYGWIN*)
+        IS_WINDOWS=true
+        ;;
+esac
 
 # --- Colores (compatibles con Git Bash) ---
 R=''; G=''; Y=''; B=''; C=''; BOLD=''; N=''
 if [ -t 1 ]; then
-    if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
-        R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-        C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
-    elif [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    if [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
         R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
         C='\033[0;36m'; BOLD='\033[1m'; N='\033[0m'
     fi
@@ -74,12 +84,10 @@ elif raw[:2] == b'\xff\xfe':
 " "$filepath" 2>/dev/null || true
 }
 
-# --- Funcion para contar componentes (archivo Python temporal) ---
+# --- Funcion para contar componentes ---
 count_components() {
     local json_file="$1"
-    local py_script="${SBOM_DIR}/_count_comp_tmp.py"
-
-    cat > "$py_script" << 'PYSCRIPT'
+    "$PYTHON_CMD" -c "
 import json, sys
 fpath = sys.argv[1]
 try:
@@ -91,10 +99,7 @@ try:
     print(len(data.get('components', [])))
 except:
     print('?')
-PYSCRIPT
-
-    "$PYTHON_CMD" "$py_script" "$json_file" 2>/dev/null
-    rm -f "$py_script" 2>/dev/null || true
+" "$json_file" 2>/dev/null
 }
 
 log ""
@@ -114,18 +119,33 @@ if ! command -v syft >/dev/null 2>&1; then
     fi
     exit 1
 fi
-syft_ver=$(syft version 2>/dev/null | grep '^Application' || syft version 2>/dev/null | head -1)
+syft_ver=$(syft version 2>/dev/null | grep -i 'version' | head -1 || syft version 2>/dev/null | head -1 || echo "desconocida")
 ok "Syft: ${syft_ver}"
+
+# Mostrar plataforma detectada
+if [ "$IS_GITBASH" = true ]; then
+    info "Plataforma: Windows (Git Bash / MINGW)"
+elif [ "$IS_WINDOWS" = true ]; then
+    info "Plataforma: Windows (Cygwin)"
+else
+    info "Plataforma: $(uname -s)"
+fi
+
+info "Directorio SBOM: ${SBOM_DIR}/"
 log ""
 
 # =====================================================================
 #  Imagenes del Lab 01 (VulnCorp PetaShop)
+#  NOTA: Syft recibe nombres de imagenes Docker (no rutas de archivos),
+#  por lo que NO hay problema de conversion de rutas aqui.
+#  La redireccion stdout (>) es manejada por bash, no por Syft.
 # =====================================================================
 IMAGE_NAMES=("nginx-proxy" "prestashop" "mariadb-prod" "redis-cache" "phpmyadmin" "workstation" "ftp-server")
 IMAGE_TAGS=("nginx:1.21.0" "prestashop/prestashop:1.7.8.0" "mariadb:10.5.18" "redis:6.2.6" "phpmyadmin:5.1.1" "ubuntu:20.04" "delfer/alpine-ftp-server")
 
 TOTAL=${#IMAGE_NAMES[@]}
 CURRENT=0
+GENERATED_OK=0
 
 for i in "${!IMAGE_NAMES[@]}"; do
     CURRENT=$((CURRENT + 1))
@@ -138,37 +158,54 @@ for i in "${!IMAGE_NAMES[@]}"; do
     log "  Imagen: ${IMAGE}"
     log "  ${B}------------------------------------------------------------${N}"
 
+    # Verificar que la imagen existe localmente
+    if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        warn "Imagen no encontrada localmente: ${IMAGE}"
+        info "Descargando imagen..."
+        if ! docker pull "$IMAGE" 2>/dev/null; then
+            fail "No se pudo descargar ${IMAGE}"
+            continue
+        fi
+    fi
+
     # --- CycloneDX JSON (formato principal) ---
     JSON_FILE="${SBOM_DIR}/${NAME}_sbom_cyclonedx.json"
+    ERR_FILE="${SBOM_DIR}/${NAME}_syft_error.log"
     info "Generando CycloneDX JSON..."
 
-    if syft "$IMAGE" -o cyclonedx-json --quiet > "$JSON_FILE" 2>/dev/null; then
+    # Syft recibe el nombre de imagen Docker (no una ruta de archivo)
+    # La redireccion > es manejada por bash, funciona en todas las plataformas
+    if syft "$IMAGE" -o cyclonedx-json > "$JSON_FILE" 2>"$ERR_FILE"; then
         : # OK
-    elif syft "$IMAGE" -o cyclonedx-json > "$JSON_FILE" 2>/dev/null; then
-        : # OK sin --quiet
     else
         fail "Error generando SBOM JSON para ${IMAGE}"
+        if [ -f "$ERR_FILE" ] && [ -s "$ERR_FILE" ]; then
+            warn "Detalle del error:"
+            head -5 "$ERR_FILE" | while IFS= read -r line; do warn "  $line"; done
+        fi
         continue
     fi
 
-    # Limpiar BOM (usando Python, no xxd)
+    # Limpiar BOM
     clean_bom "$JSON_FILE"
 
     if [ -f "$JSON_FILE" ] && [ -s "$JSON_FILE" ]; then
         COMP_COUNT=$(count_components "$JSON_FILE")
-        ok "CycloneDX JSON: ${JSON_FILE}"
+        ok "CycloneDX JSON: $(basename "$JSON_FILE")"
         info "Componentes encontrados: ${BOLD}${COMP_COUNT}${N}"
+        GENERATED_OK=$((GENERATED_OK + 1))
+        rm -f "$ERR_FILE" 2>/dev/null || true
     else
-        fail "Error generando SBOM para ${IMAGE}"
+        fail "Archivo SBOM vacio para ${IMAGE}"
         continue
     fi
 
     # --- CycloneDX XML (formato alternativo) ---
     XML_FILE="${SBOM_DIR}/${NAME}_sbom_cyclonedx.xml"
     info "Generando CycloneDX XML..."
-    if syft "$IMAGE" -o cyclonedx-xml --quiet > "$XML_FILE" 2>/dev/null || \
-       syft "$IMAGE" -o cyclonedx-xml > "$XML_FILE" 2>/dev/null; then
-        ok "CycloneDX XML:  ${XML_FILE}"
+    if syft "$IMAGE" -o cyclonedx-xml > "$XML_FILE" 2>/dev/null; then
+        clean_bom "$XML_FILE"
+        ok "CycloneDX XML:  $(basename "$XML_FILE")"
     else
         warn "No se pudo generar XML (no critico)"
     fi
@@ -176,7 +213,7 @@ for i in "${!IMAGE_NAMES[@]}"; do
     # --- Tabla resumen ---
     TABLE_FILE="${SBOM_DIR}/${NAME}_sbom_table.txt"
     syft "$IMAGE" -o table > "$TABLE_FILE" 2>/dev/null || true
-    ok "Tabla resumen:  ${TABLE_FILE}"
+    ok "Tabla resumen:  $(basename "$TABLE_FILE")"
 done
 
 # =====================================================================
@@ -194,7 +231,11 @@ cat > "$PY_SUMMARY" << 'PYSCRIPT'
 import json, os, glob, sys
 
 sbom_dir = sys.argv[1] if len(sys.argv) > 1 else './data/sbom'
-json_files = sorted(glob.glob(os.path.join(sbom_dir, '*_cyclonedx.json')))
+json_files = sorted(glob.glob(os.path.join(sbom_dir, '*_sbom_cyclonedx.json')))
+
+if not json_files:
+    print("  No se encontraron SBOMs.")
+    sys.exit(0)
 
 print(f"  {'Servicio':<18} {'Componentes':>12} {'Tipo BOM':<14} {'Spec Version':<14}")
 print(f"  {'-'*18} {'-'*12} {'-'*14} {'-'*14}")
@@ -234,7 +275,7 @@ PYSCRIPT
 rm -f "$PY_SUMMARY" 2>/dev/null || true
 
 log ""
-ok "Generacion de SBOMs completada"
+ok "Generacion de SBOMs completada (${GENERATED_OK}/${TOTAL} exitosos)"
 info "Archivos en: ${SBOM_DIR}/"
 log ""
 info "Proximo paso:"
